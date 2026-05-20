@@ -1,0 +1,8 @@
+# compiled binary
+/agent-sessions
+
+# editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
