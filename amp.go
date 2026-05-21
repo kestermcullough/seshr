@@ -16,6 +16,23 @@ import (
 // few JSON files under ~/.local/share/amp/threads/ are a partial local cache.
 // The canonical source is `amp threads list --json`, which returns AI-titled
 // metadata for every thread the user has on every machine.
+
+// ampThread is the schema of a locally cached thread file. We don't use it for
+// listing (the CLI is canonical) but we do read these files when previewing.
+type ampThread struct {
+	V         int          `json:"v"`
+	ID        string       `json:"id"`
+	Created   int64        `json:"created"`
+	Messages  []ampMessage `json:"messages"`
+	AgentMode string       `json:"agentMode"`
+	Title     string       `json:"title,omitempty"`
+}
+
+type ampMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
 type ampListEntry struct {
 	ID           string `json:"id"`
 	Title        string `json:"title"`
