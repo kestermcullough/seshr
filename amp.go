@@ -2,108 +2,93 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-type ampThread struct {
-	V         int          `json:"v"`
-	ID        string       `json:"id"`
-	Created   int64        `json:"created"` // unix ms
-	Messages  []ampMessage `json:"messages"`
-	AgentMode string       `json:"agentMode"`
-	Title     string       `json:"title,omitempty"`
-	Env       *ampEnv      `json:"env,omitempty"`
-}
-
-type ampEnv struct {
-	Initial struct {
-		Trees []struct {
-			DisplayName string `json:"displayName"`
-			URI         string `json:"uri"`
-		} `json:"trees"`
-	} `json:"initial"`
-}
-
-type ampMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+// Amp threads live primarily on Sourcegraph's server (https://ampcode.com); the
+// few JSON files under ~/.local/share/amp/threads/ are a partial local cache.
+// The canonical source is `amp threads list --json`, which returns AI-titled
+// metadata for every thread the user has on every machine.
+type ampListEntry struct {
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	Updated      string `json:"updated"`
+	Tree         string `json:"tree"` // file:// URI of the workspace root
+	MessageCount int    `json:"messageCount"`
 }
 
 func discoverAmp() ([]Session, []error) {
-	var (
-		sessions []Session
-		errs     []error
-	)
-	root := ampThreadsDir()
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, []error{err}
+	bin := findAmpBinary()
+	if bin == "" {
+		return nil, nil
 	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
+
+	cmd := exec.Command(bin, "threads", "list", "--include-archived", "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return nil, []error{fmt.Errorf("amp threads list failed: %s", strings.TrimSpace(string(ee.Stderr)))}
 		}
-		fp := filepath.Join(root, e.Name())
-		s, perr := parseAmpFile(fp)
-		if perr != nil {
-			errs = append(errs, perr)
-			continue
+		return nil, []error{fmt.Errorf("amp threads list: %w", err)}
+	}
+
+	var entries []ampListEntry
+	if err := json.Unmarshal(out, &entries); err != nil {
+		return nil, []error{fmt.Errorf("parse amp threads list output: %w", err)}
+	}
+
+	sessions := make([]Session, 0, len(entries))
+	localDir := ampThreadsDir()
+	for _, e := range entries {
+		s := Session{
+			Tool:        "amp",
+			SessionUUID: strings.TrimPrefix(e.ID, "T-"),
+			Title:       e.Title,
+			TitleSource: "ai",
+		}
+		if t, err := time.Parse(time.RFC3339, e.Updated); err == nil {
+			s.LastActive = t
+			s.StartedAt = t // "updated" is the best signal the API gives us
+		}
+		s.CWD = decodeFileURI(e.Tree)
+
+		// If we happen to have a local cache file, point at it and fill in size.
+		cachePath := filepath.Join(localDir, e.ID+".json")
+		if info, err := os.Stat(cachePath); err == nil {
+			s.FilePath = cachePath
+			s.Size = info.Size()
 		}
 		sessions = append(sessions, s)
 	}
-	return sessions, errs
+	return sessions, nil
 }
 
-func parseAmpFile(fp string) (Session, error) {
-	info, err := os.Stat(fp)
-	if err != nil {
-		return Session{}, err
+func decodeFileURI(uri string) string {
+	if uri == "" {
+		return ""
 	}
-	s := Session{
-		Tool:       "amp",
-		FilePath:   fp,
-		LastActive: info.ModTime(),
-		Size:       info.Size(),
+	p := strings.TrimPrefix(uri, "file://")
+	if dec, err := url.PathUnescape(p); err == nil {
+		return dec
 	}
+	return p
+}
 
-	f, err := os.Open(fp)
-	if err != nil {
-		return s, err
+func findAmpBinary() string {
+	if p, err := exec.LookPath("amp"); err == nil {
+		return p
 	}
-	defer f.Close()
-	var t ampThread
-	if err := json.NewDecoder(f).Decode(&t); err != nil {
-		return s, err
+	candidate := filepath.Join(homeDir(), ".amp", "bin", "amp")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
 	}
-	s.SessionUUID = strings.TrimPrefix(t.ID, "T-")
-	if t.Created > 0 {
-		s.StartedAt = time.UnixMilli(t.Created)
-	}
-	if t.Title != "" {
-		s.Title = t.Title
-		s.TitleSource = "ai"
-	}
-	if t.Env != nil && len(t.Env.Initial.Trees) > 0 {
-		s.CWD = strings.TrimPrefix(t.Env.Initial.Trees[0].URI, "file://")
-	}
-	for _, m := range t.Messages {
-		if m.Role != "user" {
-			continue
-		}
-		if txt := extractTextFromContent(m.Content); txt != "" {
-			s.FirstMsg = txt
-			if s.Title == "" {
-				s.Title = firstNChars(cleanInline(txt), 80)
-				s.TitleSource = "first-msg"
-			}
-			break
-		}
-	}
-	return s, nil
+	return ""
 }

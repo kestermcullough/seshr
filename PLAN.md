@@ -15,14 +15,17 @@ Two-pane TUI, keyboard + mouse both first-class:
 
 ## Where sessions live
 
-| Tool   | Path                                                      | Format | Per-project folders?               |
-|--------|-----------------------------------------------------------|--------|------------------------------------|
-| Codex  | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`  | JSONL  | No — flat, cwd inside `session_meta` |
-| Claude | `~/.claude/projects/<cwd-slug>/<uuid>.jsonl`              | JSONL  | Yes — slug = sanitized cwd          |
-| Amp    | `~/.local/share/amp/threads/T-<uuid>.json`                | JSON   | No — flat, cwd inside messages      |
-| Pi     | `~/.pi/agent/sessions/<cwd-slug>/<ts>_<uuid>.jsonl`       | JSONL  | Yes — slug = sanitized cwd          |
+| Tool   | Source                                                      | How we discover                                       |
+|--------|-------------------------------------------------------------|-------------------------------------------------------|
+| Codex  | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`    | Walk filesystem, parse JSONL. cwd in `session_meta`.  |
+| Claude | `~/.claude/projects/<cwd-slug>/<uuid>.jsonl`                | Walk filesystem, parse JSONL. cwd from project slug (lossy for paths with literal dashes — see below). |
+| Amp    | **Server-backed** at `https://ampcode.com`; partial local cache at `~/.local/share/amp/threads/` | Shell out to `amp threads list --include-archived --json`. cwd from `tree` field (file:// URI). |
+| Pi     | `~/.pi/agent/sessions/<cwd-slug>/<ts>_<uuid>.jsonl`         | Walk filesystem, parse JSONL. cwd from `session` record. |
 
-In all four, the cwd is recoverable from either the folder name or the session content. We treat cwd as a per-session property and filter at runtime.
+Notes:
+- **Amp** has dozens of threads on the server but only ~2 cached locally. We can't list them by walking the filesystem; we must call the CLI. If `amp` isn't on PATH and `~/.amp/bin/amp` doesn't exist, we skip the tool.
+- **Claude slug decoding** is lossy when a directory name contains a literal `-` (e.g. `OneDrive - HRSD`). For *display* this is cosmetic; for *cwd filtering*, we should slug-encode the comparison cwd at query time rather than trust the decoded path.
+- We treat cwd as a per-session property and filter at runtime regardless of physical layout.
 
 ## Directory scoping
 
