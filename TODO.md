@@ -4,124 +4,61 @@ Living roadmap. Top of the list is "do next."
 
 ---
 
-## Add-project modal — refinements (the modal itself is done)
+## 1. Always-on search bar (sessions view)
 
-- Right now the modal lists directories only; show whether a dir already exists as a project (e.g., dimmed + tag)
-- Discovered-cwds shortcut: a small header section above the directory list that shows cwds we've already seen sessions in, ranked by recency. One Enter to add.
-- Toggle hidden dirs (`.`-prefixed) with a key — currently always hidden
-- Show how many sessions live under the highlighted directory (live preview)
-- Rename on save: optional second-step input to set a display name different from `filepath.Base(path)`
+The brief was *"fully searchable fast smart search as you type"* — today `/` enters a modal filter mode, which isn't that. Refactor: an always-focused `textinput.Model` at the top of the sessions screen drives filtering directly. List items are filtered in our code (fuzzy match via `sahilm/fuzzy`, which we already depend on) and fed into `list.SetItems`.
 
-## Live refresh — follow-ups
+Side benefit: bubbles/list's built-in filter overlay goes away, freeing the `/` key for something else.
 
-Background polling shipped: a `tea.Tick` every 5s while in the sessions view runs a soft refresh against file-based tools (Claude/Codex/Pi). Selection is preserved by session ID; Amp rows are not marked missing.
+## 2. Project picker — polish
 
-Still open:
-- **Amp polling.** Currently skipped. Options: poll the Amp CLI separately at a much longer cadence (30–60s), cache the API output briefly, or rely on `R` for Amp updates.
-- **mtime-skip on file-based polls.** Today every tick re-parses every Claude/Codex/Pi file. With ~150 sessions on this machine it's fast, but it would scale better to only re-parse files whose mtime changed since the last successful sync.
-- **fsnotify** for true event-driven updates. WSL/Windows-mount reliability is iffy — only worth it if polling proves too laggy.
-
-## Sessions screen — more color
-
-Tool-name chips landed already (orange/teal/purple/pink for claude/codex/amp/pi). Still to do:
-
-- Scope chip in the list title (`/home/kester/mainframe`) styled distinctly
-- Archived indicator on rows (dim text + tag)
-- Missing indicator on rows (red strike-through or marker)
-- Status line: success green, error red
-- Selection highlight that respects the tool color of the selected row
-
-## Project picker — polish (smaller tasks)
-
-- Manual reorder (`J`/`K` to push pinned rows up/down → writes sort_order)
+- Manual reorder (`J`/`K` to push pinned rows up/down → writes `sort_order`)
 - Rename project (`r`)
 - Remove project (`d` with confirmation)
 - "Save as project?" prompt when entering Current dir with no saved project
 
----
+## 3. Add-project modal — refinements
 
-## Earlier-conceived major work: project-based navigation
+- Show how many sessions live under the highlighted directory (live count — query DB on cursor change)
+- Show whether a dir already exists as a project (dimmed + tag)
+- Discovered-cwds shortcut: a small header showing cwds we've seen sessions in, ranked by recency. One Enter to add.
+- Toggle hidden dirs with a key (currently always hidden)
+- Optional rename step on save
 
-Replace the flat list-with-cwd-filter UX with a two-level model:
+## 4. Sessions screen — more color
 
-1. **Project picker** (first screen on launch)
-2. **Session list** (the existing two-pane TUI, scoped to the chosen project)
+Tool-name chips landed (orange/teal/purple/pink). Still:
 
-### Picker layout
+- Scope chip in the list title (`/home/kester/mainframe`) styled distinctly
+- Archived indicator on rows (dim + tag) — important when `--archived` is on
+- Missing indicator on rows
+- Status line: success green, error red
+- Selection highlight that respects the tool color of the selected row
 
-```
-┌─ Projects ────────────────────────────────┐
-│ ▶ Current dir   (/home/kester/foo)        │
-│   mainframe     /home/kester/mainframe    │  ← user-added, sortable
-│   cl2-ctrl      /mnt/c/.../cl2 controller │
-│   markdownii    /mnt/c/.../markdownii     │
-│   …                                        │
-│   + Add project                            │
-│   All sessions                             │
-└────────────────────────────────────────────┘
-```
+## 5. End-to-end resume test
 
-- **Current dir**: ephemeral, always at the top. Picks up `os.Getwd()` on launch. If the user visits a session under it, prompt to save as a project.
-- **User-added projects**: sorted by `last_used_at desc` by default; manual reorder (k/J on the row, or future drag) writes a non-NULL `sort_order` that pins position until moved again. New projects appear by recency until pinned.
-- **+ Add project**: opens a sub-screen showing *discovered cwds* (every cwd we've seen in any session) ranked by session count + recency. One-click to promote. Also accepts arbitrary paths typed in.
-- **All sessions**: always at the bottom. Same flat view we have today.
+`syscall.Exec` paths are wired for all four tools but none have actually been triggered. Pick a throwaway session of each kind, verify the handoff feels clean (terminal state restored, alt-screen exited, parent process gone).
 
-### Subproject behavior
+## 6. Live refresh follow-ups
 
-Recursive prefix match (current behavior). A session under `/home/kester/mainframe` shows in both a `/home/kester` project view and a `/home/kester/mainframe` project view — they're different lenses, both valid. No dedup. Document so it isn't surprising.
+5s tea.Tick polling for file-based tools shipped. Still open:
 
-### Schema
+- **mtime-skip** in the per-tick parse so we only re-read files that changed since last sync
+- **fsnotify** for true event-driven updates (WSL reliability is iffy — only if polling proves laggy)
+- Decide whether to ever poll Amp on a long cadence (current decision: no, R-only)
 
-New table:
+## 7. Name the tool
 
-```sql
-CREATE TABLE projects (
-  id           INTEGER PRIMARY KEY,
-  name         TEXT NOT NULL,         -- display; defaults to filepath.Base(path)
-  path         TEXT NOT NULL UNIQUE,  -- the cwd prefix used for filtering
-  sort_order   INTEGER,               -- NULL = sort by last_used_at; non-NULL pins
-  last_used_at INTEGER,
-  added_at     INTEGER NOT NULL
-);
-```
-
-`last_used_at` updates whenever the user enters that project's session view.
-
-### Implementation pieces
-
-- `projects.go` — CRUD on the new table (add, rename, remove, reorder, bump-last-used)
-- TUI: new picker screen as the entry view; existing session view becomes the second screen pushed onto a tiny screen stack
-- Discovered-cwds suggestion query: `SELECT cwd, COUNT(*), MAX(last_active) FROM sessions WHERE cwd != '' GROUP BY cwd ORDER BY 3 DESC`
-- Back nav from session view → picker (Esc when filter is closed)
-- Persist last-opened project so re-launch goes straight there? (open question — initial vote: no, always show picker; user can `q` then re-enter)
-
----
-
-## Other priorities (mostly already agreed)
-
-1. **Always-on search bar.** Right now `/` enters filter mode (modal). The brief was *as you type* — input should always be focused at the top of the list, no modal step. Refactor the TUI to drive `list.Model` from an external `textinput.Model` instead of using its built-in filter.
-
-2. **Real Amp previews.** 44 of 151 sessions show metadata only because Amp content lives at ampcode.com. Shell out to `amp threads export <id>` lazily (first time the preview is opened) and cache the result. Cache target: a `preview_cache` column on `sessions` or a sidecar dir under `~/.local/share/agent-sessions/cache/`.
-
-3. **End-to-end resume test.** `syscall.Exec` paths are written for all four tools but none have actually been triggered. Pick a throwaway session of each kind and verify the handoff feels clean (terminal state restored, alt-screen exited, parent process gone).
-
-4. **Claude cwd accuracy.** Today: slug-decode `/mnt/c/.../OneDrive - HRSD/...` becomes `OneDrive///HRSD/...`. Two-line fix: when parsing Claude JSONL, also check for a per-record `cwd` field (present in some Claude record types) and prefer it over the slug-decoded path. Also unblocks accurate cwd-prefix filtering for projects on OneDrive paths.
-
-5. **Polish that'll matter after a week of use:**
-   - Archived indicator in the list (so `--archived` view is readable)
-   - Recently-opened sort boost (opened in last hour → bump up)
-   - Double-click on a row → resume
-   - Tool color in the list (claude/codex/amp/pi each get a hue)
-
-6. **Name the tool.** `agent-sessions` is a placeholder. Candidates to noodle on: `agenda`, `threadwise`, `sessions`, `recall`, `mux`. (Open to anything.)
+`agent-sessions` is a placeholder. Candidates: `agenda`, `threadwise`, `sessions`, `recall`, `mux`. Open to anything.
 
 ---
 
 ## Deferred / nice-to-have
 
-- **Content search (FTS5).** Title + cwd is enough for v1; full-text over messages is a real feature but a separate effort (lazy indexing, ranked snippets, etc.).
-- **Codex title quality.** Some Codex sessions start with pasted terminal output, which becomes a noisy "title." Could filter out lines starting with `kester@...$` or detect shell-prompt patterns.
-- **Cross-tool actions.** Replay a Codex session in Claude, etc. Out of scope.
-- **Multi-machine / sync.** If you ever want this on multiple machines, the DB becomes a sync problem. Punt.
-- **Auth tokens.** None of this needs auth except Amp, and Amp's CLI handles its own.
-- **Performance.** Currently re-parses every session file on each launch. With ~150 sessions it's ~1s; if it grows past ~1000 we'd want mtime-skip on the upsert path.
+- **Content search (FTS5).** Title + cwd is enough for now; full-text over messages is a separate effort (lazy indexing, ranked snippets).
+- **Codex title quality.** Some Codex sessions start with pasted terminal output, which becomes a noisy "title." Could filter out shell-prompt patterns.
+- **Recently-opened sort boost.** Bump a session that was opened in the last hour.
+- **Double-click to resume.** Currently mouse selects but doesn't resume.
+- **Cross-tool actions.** Replay a Codex session in Claude. Out of scope.
+- **Multi-machine / sync.** Punt.
+- **Performance.** Re-parses every session file on each launch. With ~150 sessions it's ~1s; if it grows past ~1000 we'd want mtime-skip more urgently.
