@@ -4,17 +4,13 @@ Living roadmap. Top of the list is "do next."
 
 ---
 
-## Project picker — file-tree modal for "+ Add"
+## Add-project modal — refinements (the modal itself is done)
 
-Replace the bare text input behind "+ Add project" with a centered popup that lets you browse the filesystem.
-
-- Centered modal (~60% of viewport, lipgloss.Place to position)
-- Tree navigation (↑/↓ ← → or h/j/k/l)
-- Type to fast-find (substring/fuzzy filter on visible entries)
-- Enter on a directory → save as project
-- Esc → cancel
-
-`bubbles/filepicker` handles tree navigation; layer a `textinput` on top for the type-to-filter, or roll our own with `list.Model` over `os.ReadDir`. Filepicker route is the shorter one — start there and add filter as a wrap.
+- Right now the modal lists directories only; show whether a dir already exists as a project (e.g., dimmed + tag)
+- Discovered-cwds shortcut: a small header section above the directory list that shows cwds we've already seen sessions in, ranked by recency. One Enter to add.
+- Toggle hidden dirs (`.`-prefixed) with a key — currently always hidden
+- Show how many sessions live under the highlighted directory (live preview)
+- Rename on save: optional second-step input to set a display name different from `filepath.Base(path)`
 
 ## Sessions screen — more color
 

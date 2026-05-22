@@ -130,8 +130,8 @@ type tuiModel struct {
 	// picker
 	pickerList list.Model
 
-	// add-project input
-	addInput textinput.Model
+	// add-project modal
+	addProject addProjectState
 
 	// sessions
 	list    list.Model
@@ -166,17 +166,13 @@ func newTUI(db *DB) tuiModel {
 	vp := viewport.New(0, 0)
 	vp.SetContent("(select a session to preview)")
 
-	in := textinput.New()
-	in.Placeholder = "path"
-	in.CharLimit = 1024
-
 	return tuiModel{
 		db:         db,
 		mode:       modePicker,
 		pickerList: pl,
 		list:       sl,
 		preview:    vp,
-		addInput:   in,
+		addProject: newAddProject(),
 	}
 }
 
@@ -306,10 +302,9 @@ func (m tuiModel) handlePickerEnter(it pickerItem) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m tuiModel) enterAddMode(prefill string) (tea.Model, tea.Cmd) {
+func (m tuiModel) enterAddMode(startDir string) (tea.Model, tea.Cmd) {
 	m.mode = modeAddProject
-	m.addInput.SetValue(prefill)
-	m.addInput.Focus()
+	m.addProject.reset(startDir)
 	return m, textinput.Blink
 }
 
@@ -320,14 +315,25 @@ func (m tuiModel) updateAddProject(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch km.String() {
 		case "esc":
 			m.mode = modePicker
-			m.addInput.Blur()
+			m.addProject.filter.Blur()
 			return m, nil
 		case "ctrl+c":
 			return m, tea.Quit
+		case "up":
+			m.addProject.moveCursor(-1)
+			return m, nil
+		case "down":
+			m.addProject.moveCursor(1)
+			return m, nil
+		case "pgup":
+			m.addProject.moveCursor(-10)
+			return m, nil
+		case "pgdown":
+			m.addProject.moveCursor(10)
+			return m, nil
 		case "enter":
-			path := strings.TrimSpace(m.addInput.Value())
-			if path == "" {
-				m.status = "path required"
+			saved, path := m.addProject.activateCursor()
+			if !saved {
 				return m, nil
 			}
 			p, err := m.db.AddProject("", path)
@@ -335,14 +341,17 @@ func (m tuiModel) updateAddProject(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "add failed: " + err.Error()
 				return m, nil
 			}
-			m.status = "added: " + p.Name
+			m.status = addedStatus(p)
 			m.mode = modePicker
-			m.addInput.Blur()
+			m.addProject.filter.Blur()
 			return m, m.loadProjectsCmd()
 		}
 	}
+	// Forward to the filter textinput; clamp the cursor since the visible set
+	// can shrink as the user types.
 	var cmd tea.Cmd
-	m.addInput, cmd = m.addInput.Update(msg)
+	m.addProject.filter, cmd = m.addProject.filter.Update(msg)
+	m.addProject.clampCursor()
 	return m, cmd
 }
 
@@ -503,15 +512,7 @@ func (m tuiModel) viewPicker() string {
 }
 
 func (m tuiModel) viewAddProject() string {
-	border := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2).BorderForeground(lipgloss.Color("240"))
-	body := border.Render(lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Bold(true).Render("Add project"),
-		"",
-		"Path (e.g. /home/kester/mainframe):",
-		m.addInput.View(),
-	))
-	help := "enter save · esc cancel"
-	return lipgloss.JoinVertical(lipgloss.Left, body, lipgloss.NewStyle().Faint(true).Render(help))
+	return m.addProject.view(m.width, m.height)
 }
 
 func (m tuiModel) viewSessions() string {
@@ -542,8 +543,6 @@ func (m *tuiModel) layout() {
 	m.list.SetSize(max1(leftW-pad, 10), max1(bodyH-2, 6))
 	m.preview.Width = max1(rightW-pad, 10)
 	m.preview.Height = max1(bodyH-2, 6)
-
-	m.addInput.Width = max1(m.width-12, 20)
 }
 
 func max1(a, b int) int {
