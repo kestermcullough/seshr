@@ -123,6 +123,10 @@ Views:
 - Preview budget — show full last turn even if huge? Probably truncate at ~50 lines with a "…" indicator.
 - Final tool name (currently the folder is `agent-sessions`).
 
+## What's next
+
+See **TODO.md** for the prioritized roadmap. The next major piece is project-based navigation (picker as first screen) — the flat list with `--all` / cwd-prefix filter is v1 only.
+
 ## Non-goals (v1)
 
 - Editing sessions
