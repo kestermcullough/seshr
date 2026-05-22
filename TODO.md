@@ -12,6 +12,14 @@ Living roadmap. Top of the list is "do next."
 - Show how many sessions live under the highlighted directory (live preview)
 - Rename on save: optional second-step input to set a display name different from `filepath.Base(path)`
 
+## Background refresh while viewing sessions
+
+Today: discovery runs when you *enter* a project (~1–2s, mostly Amp's network call). After that you have to press `R` or Esc-back-and-re-enter to see changes.
+
+Next: a `tea.Tick` every 5–10s while in the sessions view that runs a lightweight resync (skip the Amp API call if it ran within the last 30s; mtime-skip file-based tools). Update list in place if anything changed; don't disturb the user's selection or filter input.
+
+`fsnotify` would be even nicer (true event-driven) but WSL/Windows-mount reliability is iffy — start with polling.
+
 ## Sessions screen — more color
 
 Tool-name chips landed already (orange/teal/purple/pink for claude/codex/amp/pi). Still to do:
