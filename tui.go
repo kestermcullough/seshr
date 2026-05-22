@@ -201,6 +201,17 @@ type refreshDoneMsg struct {
 	note     string
 }
 type softRefreshDoneMsg struct{ sessions []Session }
+type ampPreviewFetchedMsg struct {
+	sessionID string
+	err       error
+}
+
+func ampFetchCmd(s Session) tea.Cmd {
+	return func() tea.Msg {
+		_, err := ampThreadFetch(s)
+		return ampPreviewFetchedMsg{sessionID: s.ID(), err: err}
+	}
+}
 
 // ── Commands ────────────────────────────────────────────────────────────────
 
@@ -242,27 +253,38 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionsLoadedMsg:
-		m.applySessions(msg.sessions, msg.filter)
+		cmd := m.applySessions(msg.sessions, msg.filter)
 		m.mode = modeSessions
 		m.status = ""
-		return m, nil
+		return m, cmd
 
 	case archiveDoneMsg:
 		m.status = msg.note
 		return m, m.refreshSessions()
 
 	case refreshDoneMsg:
-		m.applySessions(msg.sessions, m.filter)
+		cmd := m.applySessions(msg.sessions, m.filter)
 		if msg.note != "" {
 			m.status = msg.note
 		}
-		return m, nil
+		return m, cmd
 
 	case softRefreshDoneMsg:
 		// Only mutate the list while the user is still looking at it; otherwise
 		// silently drop the result.
 		if m.mode == modeSessions {
-			m.applySessions(msg.sessions, m.filter)
+			return m, m.applySessions(msg.sessions, m.filter)
+		}
+		return m, nil
+
+	case ampPreviewFetchedMsg:
+		if it, ok := m.list.SelectedItem().(sessionItem); ok && it.s.ID() == msg.sessionID {
+			if msg.err != nil {
+				m.preview.SetContent(previewHeader(it.s) + "(amp fetch failed: " + msg.err.Error() + ")\n")
+			} else {
+				m.preview.SetContent(renderPreview(it.s))
+			}
+			m.preview.GotoTop()
 		}
 		return m, nil
 
@@ -426,8 +448,12 @@ func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.list, cmd = m.list.Update(msg)
 	if m.list.Index() != prev {
 		if it, ok := m.list.SelectedItem().(sessionItem); ok {
-			m.preview.SetContent(renderPreview(it.s))
+			s := it.s
+			m.preview.SetContent(renderPreview(s))
 			m.preview.GotoTop()
+			if needsAmpFetch(s) {
+				cmd = tea.Batch(cmd, ampFetchCmd(s))
+			}
 		}
 	}
 	var vpCmd tea.Cmd
@@ -507,7 +533,7 @@ func (m *tuiModel) applyProjects(projects []Project) {
 	m.pickerList.SetItems(items)
 }
 
-func (m *tuiModel) applySessions(sessions []Session, filter QueryFilter) {
+func (m *tuiModel) applySessions(sessions []Session, filter QueryFilter) tea.Cmd {
 	// Remember the currently-selected session ID so background refreshes
 	// don't yank the cursor away.
 	prevID := ""
@@ -527,6 +553,7 @@ func (m *tuiModel) applySessions(sessions []Session, filter QueryFilter) {
 	m.list.Title = listTitle(filter, len(sessions))
 	m.filter = filter
 
+	var selected *Session
 	switch {
 	case keepIdx >= 0:
 		// Only restore the cursor when no filter is active — bubbles/list's
@@ -534,6 +561,8 @@ func (m *tuiModel) applySessions(sessions []Session, filter QueryFilter) {
 		if m.list.FilterState() == list.Unfiltered {
 			m.list.Select(keepIdx)
 		}
+		s := sessions[keepIdx]
+		selected = &s
 		// Preview unchanged: the same session is still selected.
 	case len(sessions) > 0:
 		if m.list.FilterState() == list.Unfiltered {
@@ -541,10 +570,17 @@ func (m *tuiModel) applySessions(sessions []Session, filter QueryFilter) {
 		}
 		m.preview.SetContent(renderPreview(sessions[0]))
 		m.preview.GotoTop()
+		s := sessions[0]
+		selected = &s
 	default:
 		m.preview.SetContent("(no sessions in this scope)")
 		m.preview.GotoTop()
 	}
+
+	if selected != nil && needsAmpFetch(*selected) {
+		return ampFetchCmd(*selected)
+	}
+	return nil
 }
 
 func listTitle(f QueryFilter, n int) string {

@@ -8,11 +8,42 @@ import (
 	"strings"
 )
 
-// renderPreview produces the right-pane content for a selected session.
-// It reads the underlying file (when available) and extracts the most recent
-// user and assistant turns. For sessions without local content (e.g. most Amp
-// threads), it falls back to metadata only.
+// renderPreview produces the right-pane content for a session. For local files
+// it reads the last user/assistant turns. For Amp threads with no local file,
+// it consults the per-thread cache (populated lazily by ampFetchCmd); cache
+// miss falls back to a header + first-message placeholder while the fetch
+// runs.
 func renderPreview(s Session) string {
+	header := previewHeader(s)
+
+	if s.Tool == "amp" && s.FilePath == "" {
+		if t, ok := ampThreadCached(s); ok {
+			u, a := extractAmpTurnsFrom(t)
+			return header + renderTurnsBody(u, a, s.FirstMsg)
+		}
+		body := "(loading content from amp…)\n\n"
+		if s.FirstMsg != "" {
+			body += "→ first user message\n" + truncate(s.FirstMsg, 1500) + "\n"
+		}
+		return header + body
+	}
+
+	if s.FilePath == "" {
+		body := "(no local file available)\n\n"
+		if s.FirstMsg != "" {
+			body += "→ first user message\n" + truncate(s.FirstMsg, 1500) + "\n"
+		}
+		return header + body
+	}
+
+	lastUser, lastAssistant, err := extractLastTurns(s)
+	if err != nil {
+		return header + "(preview error: " + err.Error() + ")\n"
+	}
+	return header + renderTurnsBody(lastUser, lastAssistant, s.FirstMsg)
+}
+
+func previewHeader(s Session) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("[%s] %s\n", strings.ToUpper(s.Tool), s.Title))
 	if s.CWD != "" {
@@ -23,28 +54,17 @@ func renderPreview(s Session) string {
 	}
 	sb.WriteString("id: " + s.SessionUUID + "\n")
 	sb.WriteString(strings.Repeat("─", 60) + "\n\n")
+	return sb.String()
+}
 
-	if s.FilePath == "" {
-		sb.WriteString("(server-backed thread; full content lives at ampcode.com)\n\n")
-		if s.FirstMsg != "" {
-			sb.WriteString("→ first user message\n" + truncate(s.FirstMsg, 1500) + "\n")
-		}
-		return sb.String()
-	}
-
-	lastUser, lastAssistant, err := extractLastTurns(s)
-	if err != nil {
-		sb.WriteString("(preview error: " + err.Error() + ")\n")
-		return sb.String()
-	}
+func renderTurnsBody(lastUser, lastAssistant, firstMsg string) string {
 	if lastUser == "" && lastAssistant == "" {
-		if s.FirstMsg != "" {
-			sb.WriteString("→ first user message\n" + truncate(s.FirstMsg, 1500) + "\n")
-		} else {
-			sb.WriteString("(no turns extracted)\n")
+		if firstMsg != "" {
+			return "→ first user message\n" + truncate(firstMsg, 1500) + "\n"
 		}
-		return sb.String()
+		return "(no turns extracted)\n"
 	}
+	var sb strings.Builder
 	if lastUser != "" {
 		sb.WriteString("→ user\n" + truncate(lastUser, 1500) + "\n\n")
 	}
@@ -148,7 +168,11 @@ func extractAmpTurns(fp string) (string, string, error) {
 	if err := json.NewDecoder(f).Decode(&t); err != nil {
 		return "", "", err
 	}
-	var lastUser, lastAssistant string
+	u, a := extractAmpTurnsFrom(&t)
+	return u, a, nil
+}
+
+func extractAmpTurnsFrom(t *ampThread) (lastUser, lastAssistant string) {
 	for _, m := range t.Messages {
 		txt := extractTextFromContent(m.Content)
 		if txt == "" {
@@ -161,7 +185,7 @@ func extractAmpTurns(fp string) (string, string, error) {
 			lastAssistant = txt
 		}
 	}
-	return lastUser, lastAssistant, nil
+	return
 }
 
 func extractPiTurns(fp string) (string, string, error) {
