@@ -12,13 +12,14 @@ Living roadmap. Top of the list is "do next."
 - Show how many sessions live under the highlighted directory (live preview)
 - Rename on save: optional second-step input to set a display name different from `filepath.Base(path)`
 
-## Background refresh while viewing sessions
+## Live refresh — follow-ups
 
-Today: discovery runs when you *enter* a project (~1–2s, mostly Amp's network call). After that you have to press `R` or Esc-back-and-re-enter to see changes.
+Background polling shipped: a `tea.Tick` every 5s while in the sessions view runs a soft refresh against file-based tools (Claude/Codex/Pi). Selection is preserved by session ID; Amp rows are not marked missing.
 
-Next: a `tea.Tick` every 5–10s while in the sessions view that runs a lightweight resync (skip the Amp API call if it ran within the last 30s; mtime-skip file-based tools). Update list in place if anything changed; don't disturb the user's selection or filter input.
-
-`fsnotify` would be even nicer (true event-driven) but WSL/Windows-mount reliability is iffy — start with polling.
+Still open:
+- **Amp polling.** Currently skipped. Options: poll the Amp CLI separately at a much longer cadence (30–60s), cache the API output briefly, or rely on `R` for Amp updates.
+- **mtime-skip on file-based polls.** Today every tick re-parses every Claude/Codex/Pi file. With ~150 sessions on this machine it's fast, but it would scale better to only re-parse files whose mtime changed since the last successful sync.
+- **fsnotify** for true event-driven updates. WSL/Windows-mount reliability is iffy — only worth it if polling proves too laggy.
 
 ## Sessions screen — more color
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -146,6 +147,14 @@ CREATE TABLE IF NOT EXISTS projects (
 // (archived, opened_at, open_count). Sessions in the DB that no longer appear
 // in `discovered` get missing=1; rediscovered sessions are reset to missing=0.
 func (d *DB) SyncSessions(discovered []Session) error {
+	return d.SyncSessionsScoped(discovered, nil)
+}
+
+// SyncSessionsScoped is like SyncSessions but only marks rows missing whose
+// tool is in `scope`. Pass nil to mark missing across all tools (full sync);
+// pass e.g. ["claude","codex","pi"] for a partial sync that should not touch
+// Amp rows.
+func (d *DB) SyncSessionsScoped(discovered []Session, scope []string) error {
 	now := time.Now().Unix()
 	tx, err := d.sqldb.Begin()
 	if err != nil {
@@ -153,8 +162,23 @@ func (d *DB) SyncSessions(discovered []Session) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`UPDATE sessions SET missing=1`); err != nil {
-		return err
+	if len(scope) == 0 {
+		if _, err := tx.Exec(`UPDATE sessions SET missing=1`); err != nil {
+			return err
+		}
+	} else {
+		placeholders := strings.Repeat("?,", len(scope))
+		placeholders = strings.TrimSuffix(placeholders, ",")
+		args := make([]any, len(scope))
+		for i, t := range scope {
+			args[i] = t
+		}
+		if _, err := tx.Exec(
+			`UPDATE sessions SET missing=1 WHERE tool IN (`+placeholders+`)`,
+			args...,
+		); err != nil {
+			return err
+		}
 	}
 
 	stmt, err := tx.Prepare(`

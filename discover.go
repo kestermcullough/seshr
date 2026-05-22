@@ -11,13 +11,33 @@ type discoverFunc func() ([]Session, []error)
 // Returned sessions are sorted by LastActive descending (newest first).
 // Errors are accumulated and returned alongside the partial results.
 func DiscoverAll() ([]Session, []error) {
-	funcs := []discoverFunc{
+	return discoverWith([]discoverFunc{
 		discoverClaude,
 		discoverCodex,
 		discoverAmp,
 		discoverPi,
-	}
+	})
+}
 
+// DiscoverFileBased runs only the tools whose sessions live on the local
+// filesystem (Claude, Codex, Pi) — i.e. cheap enough to call from a periodic
+// background tick. Amp is excluded because it requires a network call.
+//
+// FileBasedTools should match the set of tools dispatched here; it's used by
+// callers that need to scope DB sync to "just what this function covered."
+func DiscoverFileBased() ([]Session, []error) {
+	return discoverWith([]discoverFunc{
+		discoverClaude,
+		discoverCodex,
+		discoverPi,
+	})
+}
+
+// FileBasedTools is the tool-name set covered by DiscoverFileBased. Pass to
+// SyncSessionsScoped so background ticks don't mark Amp rows missing.
+var FileBasedTools = []string{"claude", "codex", "pi"}
+
+func discoverWith(funcs []discoverFunc) ([]Session, []error) {
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
@@ -36,7 +56,6 @@ func DiscoverAll() ([]Session, []error) {
 		}(fn)
 	}
 	wg.Wait()
-
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].LastActive.After(sessions[j].LastActive)
 	})

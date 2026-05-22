@@ -177,7 +177,15 @@ func newTUI(db *DB) tuiModel {
 }
 
 func (m tuiModel) Init() tea.Cmd {
-	return tea.Batch(m.loadProjectsCmd(), textinput.Blink)
+	return tea.Batch(m.loadProjectsCmd(), textinput.Blink, tickEvery(pollInterval))
+}
+
+const pollInterval = 5 * time.Second
+
+type tickMsg time.Time
+
+func tickEvery(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -192,6 +200,7 @@ type refreshDoneMsg struct {
 	sessions []Session
 	note     string
 }
+type softRefreshDoneMsg struct{ sessions []Session }
 
 // ── Commands ────────────────────────────────────────────────────────────────
 
@@ -248,6 +257,21 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = msg.note
 		}
 		return m, nil
+
+	case softRefreshDoneMsg:
+		// Only mutate the list while the user is still looking at it; otherwise
+		// silently drop the result.
+		if m.mode == modeSessions {
+			m.applySessions(msg.sessions, m.filter)
+		}
+		return m, nil
+
+	case tickMsg:
+		// Always keep ticking. Only do work when in the sessions view.
+		if m.mode == modeSessions {
+			return m, tea.Batch(m.softRefreshCmd(), tickEvery(pollInterval))
+		}
+		return m, tickEvery(pollInterval)
 	}
 
 	switch m.mode {
@@ -453,6 +477,21 @@ func (m tuiModel) refreshSessions() tea.Cmd {
 	}
 }
 
+// softRefreshCmd is the background-tick refresh. It only re-scans file-based
+// tools (no Amp network call), syncs scoped to those tools (so Amp rows aren't
+// marked missing), and replies with a softRefreshDoneMsg that preserves the
+// user's selection.
+func (m tuiModel) softRefreshCmd() tea.Cmd {
+	db := m.db
+	filter := m.filter
+	return func() tea.Msg {
+		discovered, _ := DiscoverFileBased()
+		_ = db.SyncSessionsScoped(discovered, FileBasedTools)
+		sessions, _ := db.Query(filter)
+		return softRefreshDoneMsg{sessions: sessions}
+	}
+}
+
 // ── Apply helpers ───────────────────────────────────────────────────────────
 
 func (m *tuiModel) applyProjects(projects []Project) {
@@ -469,19 +508,43 @@ func (m *tuiModel) applyProjects(projects []Project) {
 }
 
 func (m *tuiModel) applySessions(sessions []Session, filter QueryFilter) {
+	// Remember the currently-selected session ID so background refreshes
+	// don't yank the cursor away.
+	prevID := ""
+	if it, ok := m.list.SelectedItem().(sessionItem); ok {
+		prevID = it.s.ID()
+	}
+
 	items := make([]list.Item, len(sessions))
+	keepIdx := -1
 	for i, s := range sessions {
 		items[i] = sessionItem{s: s}
+		if prevID != "" && s.ID() == prevID {
+			keepIdx = i
+		}
 	}
 	m.list.SetItems(items)
 	m.list.Title = listTitle(filter, len(sessions))
 	m.filter = filter
-	if len(sessions) > 0 {
+
+	switch {
+	case keepIdx >= 0:
+		// Only restore the cursor when no filter is active — bubbles/list's
+		// Select() indexes into the visible (filtered) set.
+		if m.list.FilterState() == list.Unfiltered {
+			m.list.Select(keepIdx)
+		}
+		// Preview unchanged: the same session is still selected.
+	case len(sessions) > 0:
+		if m.list.FilterState() == list.Unfiltered {
+			m.list.Select(0)
+		}
 		m.preview.SetContent(renderPreview(sessions[0]))
-	} else {
+		m.preview.GotoTop()
+	default:
 		m.preview.SetContent("(no sessions in this scope)")
+		m.preview.GotoTop()
 	}
-	m.preview.GotoTop()
 }
 
 func listTitle(f QueryFilter, n int) string {
