@@ -64,6 +64,15 @@ CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active DESC
 CREATE INDEX IF NOT EXISTS idx_sessions_cwd         ON sessions(cwd);
 CREATE INDEX IF NOT EXISTS idx_sessions_archived    ON sessions(archived);
 CREATE INDEX IF NOT EXISTS idx_sessions_missing     ON sessions(missing);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id           INTEGER PRIMARY KEY,
+    name         TEXT    NOT NULL,
+    path         TEXT    NOT NULL UNIQUE,
+    sort_order   INTEGER,
+    last_used_at INTEGER,
+    added_at     INTEGER NOT NULL
+);
 `
 
 // SyncSessions upserts discovered records, preserving user-owned columns

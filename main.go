@@ -8,8 +8,8 @@ import (
 
 func main() {
 	var (
-		all      = flag.Bool("all", false, "show sessions from every cwd (default: only current dir + descendants)")
-		archived = flag.Bool("archived", false, "include archived sessions")
+		all      = flag.Bool("all", false, "(--list only) show sessions from every cwd")
+		archived = flag.Bool("archived", false, "(--list only) include archived sessions")
 		listOnly = flag.Bool("list", false, "dump sessions to stdout and exit (no TUI)")
 	)
 	flag.Parse()
@@ -29,25 +29,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	filter := QueryFilter{ShowArchived: *archived}
-	if !*all {
-		if cwd, err := os.Getwd(); err == nil {
-			filter.CWDPrefix = cwd
-		}
-	}
-	sessions, err := db.Query(filter)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "query:", err)
-		os.Exit(1)
-	}
-
 	if *listOnly {
+		filter := QueryFilter{ShowArchived: *archived}
+		if !*all {
+			if cwd, err := os.Getwd(); err == nil {
+				filter.CWDPrefix = cwd
+			}
+		}
+		sessions, err := db.Query(filter)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "query:", err)
+			os.Exit(1)
+		}
 		db.Close()
 		printSessions(sessions, filter)
 		return
 	}
 
-	resume, err := runTUI(db, sessions, filter)
+	resume, err := runTUI(db)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)
 		db.Close()
