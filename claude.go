@@ -14,22 +14,12 @@ type claudeRecord struct {
 	AITitle   string          `json:"aiTitle,omitempty"`
 	Message   json.RawMessage `json:"message,omitempty"`
 	Timestamp string          `json:"timestamp,omitempty"`
+	CWD       string          `json:"cwd,omitempty"`
 }
 
 type claudeMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
-}
-
-// decodeClaudeSlug reverses Claude's project-directory naming back to a path,
-// best effort. The encoding maps "/" -> "-", so paths containing literal
-// dashes round-trip lossily. We use this for display only; matching by cwd
-// should slug-encode the candidate path instead.
-func decodeClaudeSlug(slug string) string {
-	if !strings.HasPrefix(slug, "-") {
-		return slug
-	}
-	return strings.ReplaceAll(slug, "-", "/")
 }
 
 func discoverClaude() ([]Session, []error) {
@@ -50,7 +40,6 @@ func discoverClaude() ([]Session, []error) {
 			continue
 		}
 		projDir := filepath.Join(root, projEnt.Name())
-		cwd := decodeClaudeSlug(projEnt.Name())
 
 		files, err := os.ReadDir(projDir)
 		if err != nil {
@@ -62,7 +51,7 @@ func discoverClaude() ([]Session, []error) {
 				continue
 			}
 			fp := filepath.Join(projDir, fEnt.Name())
-			sess, perr := parseClaudeFile(fp, cwd)
+			sess, perr := parseClaudeFile(fp)
 			if perr != nil {
 				errs = append(errs, perr)
 				continue
@@ -73,7 +62,7 @@ func discoverClaude() ([]Session, []error) {
 	return sessions, errs
 }
 
-func parseClaudeFile(fp, cwd string) (Session, error) {
+func parseClaudeFile(fp string) (Session, error) {
 	info, err := os.Stat(fp)
 	if err != nil {
 		return Session{}, err
@@ -83,7 +72,6 @@ func parseClaudeFile(fp, cwd string) (Session, error) {
 		Tool:        "claude",
 		SessionUUID: uuid,
 		FilePath:    fp,
-		CWD:         cwd,
 		LastActive:  info.ModTime(),
 		Size:        info.Size(),
 	}
@@ -98,7 +86,7 @@ func parseClaudeFile(fp, cwd string) (Session, error) {
 	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 	var gotTitle, gotFirstMsg bool
 	for sc.Scan() {
-		if gotTitle && gotFirstMsg && !s.StartedAt.IsZero() {
+		if gotTitle && gotFirstMsg && !s.StartedAt.IsZero() && s.CWD != "" {
 			break
 		}
 		var r claudeRecord
@@ -109,6 +97,11 @@ func parseClaudeFile(fp, cwd string) (Session, error) {
 			if t, err := time.Parse(time.RFC3339, r.Timestamp); err == nil {
 				s.StartedAt = t
 			}
+		}
+		// Claude embeds the real cwd in every record; the per-project slug
+		// directory name is lossy and not authoritative.
+		if s.CWD == "" && r.CWD != "" {
+			s.CWD = r.CWD
 		}
 		switch r.Type {
 		case "ai-title":

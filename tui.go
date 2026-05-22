@@ -206,6 +206,10 @@ func (m tuiModel) loadProjectsCmd() tea.Cmd {
 func (m tuiModel) loadSessionsCmd(filter QueryFilter, projectID int64) tea.Cmd {
 	db := m.db
 	return func() tea.Msg {
+		// Always discover + sync before querying so newly-active and
+		// just-finalized sessions surface without the user having to refresh.
+		discovered, _ := DiscoverAll()
+		_ = db.SyncSessions(discovered)
 		sessions, _ := db.Query(filter)
 		if projectID > 0 {
 			_ = db.TouchProject(projectID)
@@ -231,6 +235,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionsLoadedMsg:
 		m.applySessions(msg.sessions, msg.filter)
 		m.mode = modeSessions
+		m.status = ""
 		return m, nil
 
 	case archiveDoneMsg:
@@ -272,6 +277,9 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "enter":
 			if it, ok := m.pickerList.SelectedItem().(pickerItem); ok {
+				if it.kind != pickerAdd {
+					m.status = "scanning…"
+				}
 				return m.handlePickerEnter(it)
 			}
 		case "+":

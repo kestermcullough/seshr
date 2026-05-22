@@ -20,16 +20,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	discovered, errs := DiscoverAll()
-	for _, e := range errs {
-		fmt.Fprintln(os.Stderr, "warn:", e)
-	}
-	if err := db.SyncSessions(discovered); err != nil {
-		fmt.Fprintln(os.Stderr, "sync:", err)
-		os.Exit(1)
-	}
-
 	if *listOnly {
+		discovered, errs := DiscoverAll()
+		for _, e := range errs {
+			fmt.Fprintln(os.Stderr, "warn:", e)
+		}
+		if err := db.SyncSessions(discovered); err != nil {
+			fmt.Fprintln(os.Stderr, "sync:", err)
+			os.Exit(1)
+		}
 		filter := QueryFilter{ShowArchived: *archived}
 		if !*all {
 			if cwd, err := os.Getwd(); err == nil {
@@ -46,6 +45,10 @@ func main() {
 		return
 	}
 
+	// TUI mode: skip the initial bulk discovery. The TUI re-discovers
+	// every time a project is entered, so we'd just be duplicating work
+	// the first time. Subsequent launches see whatever the previous TUI
+	// sync left in the DB until the user re-enters a project.
 	resume, err := runTUI(db)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tui:", err)
