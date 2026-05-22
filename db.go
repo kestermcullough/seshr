@@ -304,6 +304,8 @@ func (d *DB) Query(f QueryFilter) ([]Session, error) {
 		s.Title = title.String
 		s.TitleSource = tSrc.String
 		s.FirstMsg = firstMsg.String
+		s.Archived = archived == 1
+		s.Missing = miss == 1
 		if startedAt.Valid {
 			s.StartedAt = time.Unix(startedAt.Int64, 0)
 		}

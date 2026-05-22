@@ -105,6 +105,17 @@ func (i sessionItem) Title() string {
 	return renderToolLabel(i.s.Tool) + " " + t
 }
 
+// Badge styles for archived/missing markers in the row description.
+var (
+	archivedBadge = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}).
+			Italic(true).
+			Render("[archived]")
+	missingBadge = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "160", Dark: "203"}).
+			Render("[missing]")
+)
+
 func (i sessionItem) Description() string {
 	when := "—"
 	if !i.s.LastActive.IsZero() {
@@ -114,7 +125,14 @@ func (i sessionItem) Description() string {
 	if cwd == "" {
 		cwd = "?"
 	}
-	return when + "  " + cwd
+	var prefix string
+	switch {
+	case i.s.Missing:
+		prefix = missingBadge + " "
+	case i.s.Archived:
+		prefix = archivedBadge + " "
+	}
+	return prefix + when + "  " + cwd
 }
 
 func (i sessionItem) FilterValue() string {
@@ -439,6 +457,14 @@ func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "R":
 				return m, m.refresh()
+			case "A":
+				m.filter.ShowArchived = !m.filter.ShowArchived
+				if m.filter.ShowArchived {
+					m.status = "showing archived"
+				} else {
+					m.status = "hiding archived"
+				}
+				return m, m.refreshSessions()
 			}
 		}
 	}
@@ -611,11 +637,8 @@ func (m tuiModel) View() string {
 func (m tuiModel) viewPicker() string {
 	border := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("240"))
 	body := border.Render(m.pickerList.View())
-	help := "↑/↓ select · enter open · + add · / filter · q quit"
-	if m.status != "" {
-		help = m.status + " · " + help
-	}
-	return lipgloss.JoinVertical(lipgloss.Left, body, lipgloss.NewStyle().Faint(true).Render(help))
+	keys := "↑/↓ select · enter open · + add · / filter · q quit"
+	return lipgloss.JoinVertical(lipgloss.Left, body, statusLine(m.status, keys))
 }
 
 func (m tuiModel) viewAddProject() string {
@@ -627,11 +650,25 @@ func (m tuiModel) viewSessions() string {
 	left := border.Render(m.list.View())
 	right := border.Render(m.preview.View())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
-	help := "j/k move · / filter · enter resume · a archive · R refresh · esc back · q quit"
-	if m.status != "" {
-		help = m.status + " · " + help
+	keys := "j/k move · / filter · enter resume · a archive · A show archived · R refresh · esc back · q quit"
+	return lipgloss.JoinVertical(lipgloss.Left, body, statusLine(m.status, keys))
+}
+
+// statusLine renders the bottom hint row with success-green / error-red
+// coloring for the transient status when present.
+func statusLine(status, keys string) string {
+	faint := lipgloss.NewStyle().Faint(true)
+	if status == "" {
+		return faint.Render(keys)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, body, lipgloss.NewStyle().Faint(true).Render(help))
+	var s lipgloss.Style
+	switch {
+	case strings.Contains(status, "failed"), strings.Contains(status, "error"):
+		s = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "160", Dark: "203"})
+	default:
+		s = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"})
+	}
+	return s.Render(status) + faint.Render(" · "+keys)
 }
 
 // ── Layout ──────────────────────────────────────────────────────────────────

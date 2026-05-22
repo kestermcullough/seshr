@@ -13,6 +13,8 @@ type Session struct {
 	TitleSource string    // "ai" | "first-msg"
 	FirstMsg    string    // full first user message text
 	Size        int64     // file size in bytes
+	Archived    bool      // user marked it hidden from default view
+	Missing     bool      // source file/thread no longer present on disk
 }
 
 func (s Session) ID() string { return s.Tool + ":" + s.SessionUUID }
