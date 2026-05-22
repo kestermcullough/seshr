@@ -73,17 +73,36 @@ func (i pickerItem) Description() string {
 
 func (i pickerItem) FilterValue() string { return i.Title() + " " + i.Description() }
 
-// ── Session items (unchanged shape) ─────────────────────────────────────────
+// ── Session items ───────────────────────────────────────────────────────────
+
+// Per-tool color chips. AdaptiveColor lets each terminal pick a value with
+// decent contrast; the dark variant is what most users will see.
+var toolColors = map[string]lipgloss.AdaptiveColor{
+	"claude": {Light: "166", Dark: "208"}, // orange
+	"codex":  {Light: "30", Dark: "36"},   // teal
+	"amp":    {Light: "92", Dark: "141"},  // purple
+	"pi":     {Light: "162", Dark: "213"}, // pink
+}
+
+// renderToolLabel returns a bold, color-coded "[TOOL]" label padded to a fixed
+// visible width so list rows line up regardless of which tool the row is for.
+func renderToolLabel(tool string) string {
+	label := "[" + strings.ToUpper(tool) + "]"
+	style := lipgloss.NewStyle().Bold(true).Width(8)
+	if c, ok := toolColors[tool]; ok {
+		style = style.Foreground(c)
+	}
+	return style.Render(label)
+}
 
 type sessionItem struct{ s Session }
 
 func (i sessionItem) Title() string {
-	tool := strings.ToUpper(i.s.Tool)
 	t := i.s.Title
 	if t == "" {
 		t = "(no title)"
 	}
-	return fmt.Sprintf("[%-6s] %s", tool, t)
+	return renderToolLabel(i.s.Tool) + " " + t
 }
 
 func (i sessionItem) Description() string {
@@ -133,7 +152,12 @@ func newTUI(db *DB) tuiModel {
 	pl.SetFilteringEnabled(true)
 	pl.SetShowHelp(false)
 
-	sl := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	sessionDelegate := list.NewDefaultDelegate()
+	// Unset the delegate's title foreground so the per-item ANSI in
+	// sessionItem.Title() (the tool-color chip) renders through. Selected
+	// rows keep the delegate's accent so selection is still visible.
+	sessionDelegate.Styles.NormalTitle = sessionDelegate.Styles.NormalTitle.UnsetForeground()
+	sl := list.New(nil, sessionDelegate, 0, 0)
 	sl.Title = "Sessions"
 	sl.SetShowStatusBar(true)
 	sl.SetFilteringEnabled(true)

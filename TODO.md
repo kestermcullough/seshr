@@ -4,7 +4,38 @@ Living roadmap. Top of the list is "do next."
 
 ---
 
-## Next major work: project-based navigation
+## Project picker — file-tree modal for "+ Add"
+
+Replace the bare text input behind "+ Add project" with a centered popup that lets you browse the filesystem.
+
+- Centered modal (~60% of viewport, lipgloss.Place to position)
+- Tree navigation (↑/↓ ← → or h/j/k/l)
+- Type to fast-find (substring/fuzzy filter on visible entries)
+- Enter on a directory → save as project
+- Esc → cancel
+
+`bubbles/filepicker` handles tree navigation; layer a `textinput` on top for the type-to-filter, or roll our own with `list.Model` over `os.ReadDir`. Filepicker route is the shorter one — start there and add filter as a wrap.
+
+## Sessions screen — more color
+
+Tool-name chips landed already (orange/teal/purple/pink for claude/codex/amp/pi). Still to do:
+
+- Scope chip in the list title (`/home/kester/mainframe`) styled distinctly
+- Archived indicator on rows (dim text + tag)
+- Missing indicator on rows (red strike-through or marker)
+- Status line: success green, error red
+- Selection highlight that respects the tool color of the selected row
+
+## Project picker — polish (smaller tasks)
+
+- Manual reorder (`J`/`K` to push pinned rows up/down → writes sort_order)
+- Rename project (`r`)
+- Remove project (`d` with confirmation)
+- "Save as project?" prompt when entering Current dir with no saved project
+
+---
+
+## Earlier-conceived major work: project-based navigation
 
 Replace the flat list-with-cwd-filter UX with a two-level model:
 
