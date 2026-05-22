@@ -10,32 +10,49 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// addProjectEntry is a single row in the modal's directory listing.
-// Most entries are subdirectories; two synthetic entries (".." and the save
-// row) bookend the list and are not filtered by the type-to-find input.
+type entryKind int
+
+const (
+	kindSubdir entryKind = iota
+	kindUp
+	kindSave
+	kindSuggest
+)
+
+// addProjectEntry is a single row in the modal's list. Most rows are
+// kindSubdir (real directories under the current path); the rest are
+// synthetic: kindUp (..), kindSave (commit current dir as project),
+// kindSuggest (cwd we already have sessions in, surfaced at the top so
+// the user can promote it without navigating).
 type addProjectEntry struct {
-	name   string
-	isUp   bool
-	isSave bool
+	kind  entryKind
+	name  string // dir name for subdir/up; full path for suggest; sentinel for save
+	count int    // sessions under this path (subdir or suggest)
 }
 
 type addProjectState struct {
-	dir        string         // currently displayed directory
-	filter     textinput.Model // type-to-find input (always focused while modal is open)
-	entries    []os.DirEntry  // raw subdirs of `dir` (no synthetic rows)
+	db         *DB
+	dir        string
+	filter     textinput.Model
+	entries    []os.DirEntry
 	cursor     int
 	showHidden bool
 	err        error
+
+	// Loaded by reset/load against the DB:
+	counts       map[string]int  // full-path → recursive session count
+	projectPaths map[string]bool // both path and real_path of every project
+	suggestions  []CwdSuggestion // top recently-active cwds for quick-add
 }
 
-func newAddProject() addProjectState {
+func newAddProject(db *DB) addProjectState {
 	in := textinput.New()
 	in.Placeholder = "type to filter…"
 	in.CharLimit = 256
-	return addProjectState{filter: in}
+	return addProjectState{db: db, filter: in}
 }
 
-// reset prepares the modal for a fresh open at startDir (falls back to cwd → /).
+// reset prepares the modal for a fresh open at startDir.
 func (a *addProjectState) reset(startDir string) {
 	if startDir == "" {
 		if c, err := os.Getwd(); err == nil {
@@ -49,7 +66,23 @@ func (a *addProjectState) reset(startDir string) {
 	a.filter.SetValue("")
 	a.filter.Focus()
 	a.cursor = 0
+	a.loadProjectMeta()
 	a.load()
+}
+
+// loadProjectMeta pulls the lookup tables we use for badges and suggestions.
+func (a *addProjectState) loadProjectMeta() {
+	a.suggestions = nil
+	a.projectPaths = map[string]bool{}
+	if a.db == nil {
+		return
+	}
+	if sugs, err := a.db.TopCwdsByRecency(8); err == nil {
+		a.suggestions = sugs
+	}
+	if set, err := a.db.ProjectPathSet(); err == nil {
+		a.projectPaths = set
+	}
 }
 
 func (a *addProjectState) load() {
@@ -58,6 +91,7 @@ func (a *addProjectState) load() {
 	if err != nil {
 		a.err = err
 		a.entries = nil
+		a.counts = map[string]int{}
 		return
 	}
 	var dirs []os.DirEntry
@@ -69,8 +103,6 @@ func (a *addProjectState) load() {
 			dirs = append(dirs, e)
 			continue
 		}
-		// Follow symlinks: include if they point at a directory. Broken or
-		// non-directory symlinks fall through and are skipped.
 		if e.Type()&os.ModeSymlink != 0 {
 			if info, err := os.Stat(filepath.Join(a.dir, e.Name())); err == nil && info.IsDir() {
 				dirs = append(dirs, e)
@@ -78,25 +110,84 @@ func (a *addProjectState) load() {
 		}
 	}
 	a.entries = dirs
+	a.loadCounts()
 	a.clampCursor()
 }
 
-// visibleEntries returns "..", then the (filtered) subdirs, then the save row.
-// ".." is omitted at the filesystem root.
+// loadCounts pre-computes, for every visible subdir, how many sessions are
+// at or under that directory. One DB query + an in-memory prefix match keeps
+// this cheap even on large dirs.
+func (a *addProjectState) loadCounts() {
+	a.counts = map[string]int{}
+	if a.db == nil {
+		return
+	}
+	rows, err := a.db.sqldb.Query(
+		`SELECT cwd, COUNT(*) FROM sessions
+           WHERE missing=0 AND archived=0 AND cwd != ''
+           GROUP BY cwd`,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	type pair struct {
+		cwd string
+		n   int
+	}
+	var all []pair
+	for rows.Next() {
+		var p pair
+		if err := rows.Scan(&p.cwd, &p.n); err == nil {
+			all = append(all, p)
+		}
+	}
+	for _, e := range a.entries {
+		ePath := filepath.Join(a.dir, e.Name())
+		for _, p := range all {
+			if p.cwd == ePath || strings.HasPrefix(p.cwd, ePath+"/") {
+				a.counts[ePath] += p.n
+			}
+		}
+	}
+}
+
+// visibleEntries returns the rows to render: optional quick-add suggestions
+// (only when filter is empty), then "..", then filtered subdirs, then the
+// save-current-dir row.
 func (a *addProjectState) visibleEntries() []addProjectEntry {
 	var out []addProjectEntry
+
+	if a.filter.Value() == "" {
+		for _, s := range a.suggestions {
+			if a.projectPaths[s.Path] {
+				continue
+			}
+			out = append(out, addProjectEntry{
+				kind:  kindSuggest,
+				name:  s.Path,
+				count: s.Count,
+			})
+		}
+	}
+
 	parent := filepath.Dir(a.dir)
 	if parent != a.dir {
-		out = append(out, addProjectEntry{name: "..", isUp: true})
+		out = append(out, addProjectEntry{kind: kindUp, name: ".."})
 	}
+
 	q := strings.ToLower(strings.TrimSpace(a.filter.Value()))
 	for _, e := range a.entries {
 		if q != "" && !strings.Contains(strings.ToLower(e.Name()), q) {
 			continue
 		}
-		out = append(out, addProjectEntry{name: e.Name()})
+		out = append(out, addProjectEntry{kind: kindSubdir, name: e.Name()})
 	}
-	out = append(out, addProjectEntry{name: "[Save THIS directory: " + a.dir + "]", isSave: true})
+
+	out = append(out, addProjectEntry{
+		kind: kindSave,
+		name: "[Save THIS directory: " + a.dir + "]",
+	})
 	return out
 }
 
@@ -127,31 +218,31 @@ func (a *addProjectState) activateCursor() (saved bool, savePath string) {
 		return false, ""
 	}
 	e := visible[a.cursor]
-	switch {
-	case e.isSave:
+	switch e.kind {
+	case kindSave:
 		return true, a.dir
-	case e.isUp:
+	case kindSuggest:
+		return true, e.name
+	case kindUp:
 		a.dir = filepath.Dir(a.dir)
 		a.filter.SetValue("")
 		a.cursor = 0
 		a.load()
 		return false, ""
-	default:
+	case kindSubdir:
 		a.dir = filepath.Join(a.dir, e.name)
 		a.filter.SetValue("")
 		a.cursor = 0
 		a.load()
 		return false, ""
 	}
+	return false, ""
 }
 
-// view returns the centered modal as a rendered string. Callers should pass
-// the full terminal width/height; the modal sizes itself within ~60-75%.
 func (a *addProjectState) view(termW, termH int) string {
-	boxW := clamp(termW*2/3, 50, 100)
-	boxH := clamp(termH*3/4, 14, 30)
-
-	innerW := boxW - 6 // border (2) + padding (4)
+	boxW := clamp(termW*2/3, 60, 110)
+	boxH := clamp(termH*3/4, 16, 32)
+	innerW := boxW - 6
 
 	header := lipgloss.NewStyle().Bold(true).Render("Add project")
 	dirLine := lipgloss.NewStyle().Faint(true).MaxWidth(innerW).Render(a.dir)
@@ -160,11 +251,10 @@ func (a *addProjectState) view(termW, termH int) string {
 	sep := lipgloss.NewStyle().Faint(true).Render(strings.Repeat("─", innerW))
 
 	visible := a.visibleEntries()
-	maxLines := boxH - 9 // header, dir, filter, sep, blank, help, blank, borders
+	maxLines := boxH - 9
 	if maxLines < 4 {
 		maxLines = 4
 	}
-	// Scroll window so the cursor stays visible.
 	start := 0
 	if a.cursor >= maxLines {
 		start = a.cursor - maxLines + 1
@@ -175,35 +265,59 @@ func (a *addProjectState) view(termW, termH int) string {
 	}
 
 	cursorStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "214"})
+	faintStyle := lipgloss.NewStyle().Faint(true)
 	upStyle := lipgloss.NewStyle().Faint(true)
 	saveStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"})
+	suggestStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "30", Dark: "36"})
+	projectTagStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "92", Dark: "141"}).Italic(true)
 
 	var rows []string
 	for i := start; i < end; i++ {
 		e := visible[i]
-		var text string
-		switch {
-		case e.isUp:
-			text = "  " + e.name
+		var line string
+		switch e.kind {
+		case kindUp:
+			text := e.name
 			if i == a.cursor {
-				text = cursorStyle.Render("▶ " + e.name)
+				line = cursorStyle.Render("▶ " + text)
 			} else {
-				text = upStyle.Render(text)
+				line = "  " + upStyle.Render(text)
 			}
-		case e.isSave:
-			text = "  " + e.name
+		case kindSave:
 			if i == a.cursor {
-				text = cursorStyle.Render("▶ " + e.name)
+				line = cursorStyle.Render("▶ " + e.name)
 			} else {
-				text = saveStyle.Render(text)
+				line = "  " + saveStyle.Render(e.name)
 			}
-		default:
-			text = "  " + e.name + "/"
+		case kindSuggest:
+			label := "+ " + e.name
+			tags := faintStyle.Render(fmt.Sprintf(" · %d session%s", e.count, plural(e.count)))
 			if i == a.cursor {
-				text = cursorStyle.Render("▶ " + e.name + "/")
+				line = cursorStyle.Render("▶ "+label) + tags
+			} else {
+				line = "  " + suggestStyle.Render(label) + tags
+			}
+		default: // kindSubdir
+			fullPath := filepath.Join(a.dir, e.name)
+			label := e.name + "/"
+			var tagsParts []string
+			if a.projectPaths[fullPath] {
+				tagsParts = append(tagsParts, projectTagStyle.Render("[project]"))
+			}
+			if c := a.counts[fullPath]; c > 0 {
+				tagsParts = append(tagsParts, faintStyle.Render(fmt.Sprintf("%d session%s", c, plural(c))))
+			}
+			tags := ""
+			if len(tagsParts) > 0 {
+				tags = "  " + strings.Join(tagsParts, " · ")
+			}
+			if i == a.cursor {
+				line = cursorStyle.Render("▶ "+label) + tags
+			} else {
+				line = "  " + label + tags
 			}
 		}
-		rows = append(rows, text)
+		rows = append(rows, line)
 	}
 	for len(rows) < maxLines {
 		rows = append(rows, "")
@@ -213,14 +327,11 @@ func (a *addProjectState) view(termW, termH int) string {
 		rows[0] = errStyle.Render("error: " + a.err.Error())
 	}
 
-	help := lipgloss.NewStyle().Faint(true).Render(
+	help := faintStyle.Render(
 		"↑/↓ move · enter open/save · type filter · esc cancel")
 
 	body := strings.Join(append([]string{
-		header,
-		dirLine,
-		filterRow,
-		sep,
+		header, dirLine, filterRow, sep,
 	}, append(rows, "", help)...), "\n")
 
 	box := lipgloss.NewStyle().
@@ -243,7 +354,13 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-// helper for status formatting after a successful add
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 func addedStatus(p Project) string {
 	return fmt.Sprintf("added: %s (%s)", p.Name, p.Path)
 }

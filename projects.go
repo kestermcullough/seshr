@@ -99,6 +99,63 @@ func resolveSymlinks(path string) string {
 	return path
 }
 
+// ProjectPathSet returns the union of every project's user-typed path and
+// resolved real_path, for "is this dir already a project?" checks.
+func (d *DB) ProjectPathSet() (map[string]bool, error) {
+	rows, err := d.sqldb.Query(`SELECT path, real_path FROM projects`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	set := map[string]bool{}
+	for rows.Next() {
+		var path string
+		var realPath sql.NullString
+		if err := rows.Scan(&path, &realPath); err != nil {
+			return nil, err
+		}
+		set[path] = true
+		if realPath.Valid && realPath.String != "" {
+			set[realPath.String] = true
+		}
+	}
+	return set, rows.Err()
+}
+
+// CwdSuggestion is a top-of-modal hint: a cwd that has sessions, ready to
+// promote to a project with one Enter.
+type CwdSuggestion struct {
+	Path  string
+	Count int
+}
+
+// TopCwdsByRecency returns the most-recently-active session cwds, grouped and
+// counted. Used by the add-project modal to surface "where you've already
+// been" without making the user navigate there.
+func (d *DB) TopCwdsByRecency(limit int) ([]CwdSuggestion, error) {
+	rows, err := d.sqldb.Query(`
+        SELECT cwd, COUNT(*) AS n
+          FROM sessions
+         WHERE missing=0 AND archived=0 AND cwd != ''
+      GROUP BY cwd
+      ORDER BY MAX(last_active) DESC
+         LIMIT ?
+    `, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CwdSuggestion
+	for rows.Next() {
+		var s CwdSuggestion
+		if err := rows.Scan(&s.Path, &s.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // TouchProject bumps last_used_at to now. Called when the user enters a
 // project's session view.
 func (d *DB) TouchProject(id int64) error {

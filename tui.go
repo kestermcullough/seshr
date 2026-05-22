@@ -190,7 +190,7 @@ func newTUI(db *DB) tuiModel {
 		pickerList: pl,
 		list:       sl,
 		preview:    vp,
-		addProject: newAddProject(),
+		addProject: newAddProject(db),
 	}
 }
 
