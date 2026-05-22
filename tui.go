@@ -292,7 +292,7 @@ func (m tuiModel) handlePickerEnter(it pickerItem) (tea.Model, tea.Cmd) {
 		}
 		return m, m.loadSessionsCmd(QueryFilter{CWDPrefix: it.cwd}, 0)
 	case pickerSaved:
-		return m, m.loadSessionsCmd(QueryFilter{CWDPrefix: it.project.Path}, it.project.ID)
+		return m, m.loadSessionsCmd(QueryFilter{CWDPrefix: it.project.MatchPath()}, it.project.ID)
 	case pickerAdd:
 		cwd, _ := os.Getwd()
 		return m.enterAddMode(cwd)

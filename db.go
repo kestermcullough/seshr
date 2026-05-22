@@ -36,7 +36,74 @@ func OpenDB() (*DB, error) {
 		sqldb.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
-	return &DB{sqldb: sqldb}, nil
+	d := &DB{sqldb: sqldb}
+	if err := d.migrate(); err != nil {
+		sqldb.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return d, nil
+}
+
+// migrate brings older schemas up to date. Safe to run repeatedly.
+func (d *DB) migrate() error {
+	// 1. Add projects.real_path column if missing (introduced after v1).
+	hasRealPath, err := d.columnExists("projects", "real_path")
+	if err != nil {
+		return err
+	}
+	if !hasRealPath {
+		if _, err := d.sqldb.Exec(`ALTER TABLE projects ADD COLUMN real_path TEXT`); err != nil {
+			return err
+		}
+	}
+	// 2. Backfill real_path for any row that's missing it. Best-effort: a
+	//    broken or missing path falls back to the user-typed path.
+	rows, err := d.sqldb.Query(
+		`SELECT id, path FROM projects WHERE real_path IS NULL OR real_path = ''`,
+	)
+	if err != nil {
+		return err
+	}
+	type todo struct {
+		id   int64
+		path string
+	}
+	var work []todo
+	for rows.Next() {
+		var t todo
+		if err := rows.Scan(&t.id, &t.path); err != nil {
+			rows.Close()
+			return err
+		}
+		work = append(work, t)
+	}
+	rows.Close()
+	for _, t := range work {
+		real := resolveSymlinks(t.path)
+		_, _ = d.sqldb.Exec(`UPDATE projects SET real_path = ? WHERE id = ?`, real, t.id)
+	}
+	return nil
+}
+
+func (d *DB) columnExists(table, column string) (bool, error) {
+	rows, err := d.sqldb.Query(fmt.Sprintf(`PRAGMA table_info(%q)`, table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (d *DB) Close() error { return d.sqldb.Close() }
