@@ -62,13 +62,20 @@ func (a *addProjectState) load() {
 	}
 	var dirs []os.DirEntry
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
 		if !a.showHidden && strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		dirs = append(dirs, e)
+		if e.IsDir() {
+			dirs = append(dirs, e)
+			continue
+		}
+		// Follow symlinks: include if they point at a directory. Broken or
+		// non-directory symlinks fall through and are skipped.
+		if e.Type()&os.ModeSymlink != 0 {
+			if info, err := os.Stat(filepath.Join(a.dir, e.Name())); err == nil && info.IsDir() {
+				dirs = append(dirs, e)
+			}
+		}
 	}
 	a.entries = dirs
 	a.clampCursor()
