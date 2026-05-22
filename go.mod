@@ -1,4 +1,4 @@
-module agent-sessions
+module seshr
 
 go 1.26.3
 

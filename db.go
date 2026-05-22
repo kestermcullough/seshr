@@ -16,10 +16,25 @@ type DB struct {
 }
 
 func dbDir() string {
-	return filepath.Join(homeDir(), ".local", "share", "agent-sessions")
+	return filepath.Join(homeDir(), ".local", "share", "seshr")
+}
+
+// migrateDataDirName moves the data dir from the tool's previous name
+// (agent-sessions) to its new name (seshr). Safe to run repeatedly: it only
+// renames if the new dir doesn't already exist.
+func migrateDataDirName() {
+	newDir := dbDir()
+	if _, err := os.Stat(newDir); err == nil {
+		return
+	}
+	oldDir := filepath.Join(homeDir(), ".local", "share", "agent-sessions")
+	if _, err := os.Stat(oldDir); err == nil {
+		_ = os.Rename(oldDir, newDir)
+	}
 }
 
 func OpenDB() (*DB, error) {
+	migrateDataDirName()
 	dir := dbDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
