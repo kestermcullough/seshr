@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/sahilm/fuzzy"
 )
 
 // ── Modes ───────────────────────────────────────────────────────────────────
@@ -152,9 +153,11 @@ type tuiModel struct {
 	addProject addProjectState
 
 	// sessions
-	list    list.Model
-	preview viewport.Model
-	filter  QueryFilter
+	list         list.Model
+	preview      viewport.Model
+	searchInput  textinput.Model
+	filter       QueryFilter
+	allSessions  []Session // unfiltered set most-recently loaded from DB
 
 	// shared
 	width, height int
@@ -177,20 +180,26 @@ func newTUI(db *DB) tuiModel {
 	sessionDelegate.Styles.NormalTitle = sessionDelegate.Styles.NormalTitle.UnsetForeground()
 	sl := list.New(nil, sessionDelegate, 0, 0)
 	sl.Title = "Sessions"
-	sl.SetShowStatusBar(true)
-	sl.SetFilteringEnabled(true)
-	sl.SetShowHelp(true)
+	sl.SetShowStatusBar(false)
+	sl.SetFilteringEnabled(false) // we drive filtering ourselves via searchInput
+	sl.SetShowHelp(false)
 
 	vp := viewport.New(0, 0)
 	vp.SetContent("(select a session to preview)")
 
+	si := textinput.New()
+	si.Placeholder = "type to search title, cwd, tool, first message…"
+	si.Prompt = "🔍 "
+	si.CharLimit = 256
+
 	return tuiModel{
-		db:         db,
-		mode:       modePicker,
-		pickerList: pl,
-		list:       sl,
-		preview:    vp,
-		addProject: newAddProject(db),
+		db:          db,
+		mode:        modePicker,
+		pickerList:  pl,
+		list:        sl,
+		preview:     vp,
+		searchInput: si,
+		addProject:  newAddProject(db),
 	}
 }
 
@@ -274,7 +283,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.applySessions(msg.sessions, msg.filter)
 		m.mode = modeSessions
 		m.status = ""
-		return m, cmd
+		m.searchInput.Focus()
+		return m, tea.Batch(cmd, textinput.Blink)
 
 	case archiveDoneMsg:
 		m.status = msg.note
@@ -431,44 +441,60 @@ func (m tuiModel) updateAddProject(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if km, ok := msg.(tea.KeyMsg); ok {
-		if m.list.FilterState() == list.Filtering {
-			if km.String() == "ctrl+c" {
+		switch km.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.mode = modePicker
+			m.searchInput.SetValue("")
+			m.searchInput.Blur()
+			m.status = ""
+			return m, m.loadProjectsCmd()
+		case "enter":
+			if it, ok := m.list.SelectedItem().(sessionItem); ok {
+				s := it.s
+				m.resume = &s
 				return m, tea.Quit
 			}
-			// fall through to list.Update
-		} else {
-			switch km.String() {
-			case "ctrl+c", "q":
-				return m, tea.Quit
-			case "esc":
-				// Back to picker
-				m.mode = modePicker
-				m.status = ""
-				return m, m.loadProjectsCmd()
-			case "enter":
-				if it, ok := m.list.SelectedItem().(sessionItem); ok {
-					s := it.s
-					m.resume = &s
-					return m, tea.Quit
-				}
-			case "a":
-				if it, ok := m.list.SelectedItem().(sessionItem); ok {
-					return m, m.toggleArchive(it.s)
-				}
-			case "R":
-				return m, m.refresh()
-			case "A":
-				m.filter.ShowArchived = !m.filter.ShowArchived
-				if m.filter.ShowArchived {
-					m.status = "showing archived"
-				} else {
-					m.status = "hiding archived"
-				}
-				return m, m.refreshSessions()
+			return m, nil
+		case "up", "down", "pgup", "pgdown", "home", "end":
+			return m.navList(msg)
+		case "ctrl+r":
+			return m, m.refresh()
+		case "ctrl+a":
+			if it, ok := m.list.SelectedItem().(sessionItem); ok {
+				return m, m.toggleArchive(it.s)
 			}
+			return m, nil
+		case "ctrl+t":
+			m.filter.ShowArchived = !m.filter.ShowArchived
+			if m.filter.ShowArchived {
+				m.status = "showing archived"
+			} else {
+				m.status = "hiding archived"
+			}
+			return m, m.refreshSessions()
 		}
+		// Other key: forward to search input. If its value changed, refilter.
+		prev := m.searchInput.Value()
+		var cmd tea.Cmd
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		if m.searchInput.Value() != prev {
+			return m, tea.Batch(cmd, m.refilterAndDisplay())
+		}
+		return m, cmd
 	}
 
+	// Non-key messages (mouse, ticks, etc.) — pass to viewport for scroll.
+	var vpCmd tea.Cmd
+	m.preview, vpCmd = m.preview.Update(msg)
+	return m, vpCmd
+}
+
+// navList passes a navigation key (up/down/pgup/pgdown/home/end) to the list
+// and, if the selection changed, updates the preview + dispatches an Amp fetch
+// if necessary.
+func (m tuiModel) navList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	prev := m.list.Index()
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
@@ -482,9 +508,7 @@ func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	var vpCmd tea.Cmd
-	m.preview, vpCmd = m.preview.Update(msg)
-	return m, tea.Batch(cmd, vpCmd)
+	return m, cmd
 }
 
 func (m tuiModel) toggleArchive(s Session) tea.Cmd {
@@ -559,47 +583,54 @@ func (m *tuiModel) applyProjects(projects []Project) {
 	m.pickerList.SetItems(items)
 }
 
+// applySessions stores the unfiltered set and then renders the visible slice
+// through refilterAndDisplay (which applies the current search input).
 func (m *tuiModel) applySessions(sessions []Session, filter QueryFilter) tea.Cmd {
-	// Remember the currently-selected session ID so background refreshes
-	// don't yank the cursor away.
+	m.allSessions = sessions
+	m.filter = filter
+	return m.refilterAndDisplay()
+}
+
+// refilterAndDisplay computes the search-filtered slice from m.allSessions and
+// pushes it into the list, preserving the selected session's identity across
+// updates (so background refreshes don't yank the cursor away).
+func (m *tuiModel) refilterAndDisplay() tea.Cmd {
+	visible := filterSessions(m.allSessions, m.searchInput.Value())
+
 	prevID := ""
 	if it, ok := m.list.SelectedItem().(sessionItem); ok {
 		prevID = it.s.ID()
 	}
 
-	items := make([]list.Item, len(sessions))
+	items := make([]list.Item, len(visible))
 	keepIdx := -1
-	for i, s := range sessions {
+	for i, s := range visible {
 		items[i] = sessionItem{s: s}
 		if prevID != "" && s.ID() == prevID {
 			keepIdx = i
 		}
 	}
 	m.list.SetItems(items)
-	m.list.Title = listTitle(filter, len(sessions))
-	m.filter = filter
+	m.list.Title = listTitle(m.filter, len(visible))
 
 	var selected *Session
 	switch {
 	case keepIdx >= 0:
-		// Only restore the cursor when no filter is active — bubbles/list's
-		// Select() indexes into the visible (filtered) set.
-		if m.list.FilterState() == list.Unfiltered {
-			m.list.Select(keepIdx)
-		}
-		s := sessions[keepIdx]
+		m.list.Select(keepIdx)
+		s := visible[keepIdx]
 		selected = &s
-		// Preview unchanged: the same session is still selected.
-	case len(sessions) > 0:
-		if m.list.FilterState() == list.Unfiltered {
-			m.list.Select(0)
-		}
-		m.preview.SetContent(renderPreview(sessions[0]))
+	case len(visible) > 0:
+		m.list.Select(0)
+		m.preview.SetContent(renderPreview(visible[0]))
 		m.preview.GotoTop()
-		s := sessions[0]
+		s := visible[0]
 		selected = &s
 	default:
-		m.preview.SetContent("(no sessions in this scope)")
+		if m.searchInput.Value() != "" {
+			m.preview.SetContent("(no matches)")
+		} else {
+			m.preview.SetContent("(no sessions in this scope)")
+		}
 		m.preview.GotoTop()
 	}
 
@@ -607,6 +638,25 @@ func (m *tuiModel) applySessions(sessions []Session, filter QueryFilter) tea.Cmd
 		return ampFetchCmd(*selected)
 	}
 	return nil
+}
+
+// filterSessions returns the fuzzy-matched subset of all in score order.
+// Matching is over "title cwd tool first-message" concatenated per session.
+func filterSessions(all []Session, query string) []Session {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return all
+	}
+	items := make([]string, len(all))
+	for i, s := range all {
+		items[i] = s.Title + " " + s.CWD + " " + s.Tool + " " + s.FirstMsg
+	}
+	matches := fuzzy.Find(q, items)
+	out := make([]Session, len(matches))
+	for i, mm := range matches {
+		out[i] = all[mm.Index]
+	}
+	return out
 }
 
 func listTitle(f QueryFilter, n int) string {
@@ -647,11 +697,17 @@ func (m tuiModel) viewAddProject() string {
 
 func (m tuiModel) viewSessions() string {
 	border := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("240"))
+	inputRow := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1).
+		BorderForeground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}).
+		Width(m.width - 2).
+		Render(m.searchInput.View())
 	left := border.Render(m.list.View())
 	right := border.Render(m.preview.View())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
-	keys := "j/k move · / filter · enter resume · a archive · A show archived · R refresh · esc back · q quit"
-	return lipgloss.JoinVertical(lipgloss.Left, body, statusLine(m.status, keys))
+	keys := "type to search · ↑/↓ move · enter resume · ctrl+r refresh · ctrl+a archive · ctrl+t toggle archived · esc back"
+	return lipgloss.JoinVertical(lipgloss.Left, inputRow, body, statusLine(m.status, keys))
 }
 
 // statusLine renders the bottom hint row with success-green / error-red
@@ -677,16 +733,19 @@ func (m *tuiModel) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	bodyH := m.height - 2
+	// Picker view: just list + 1-line help.
+	pickerBodyH := m.height - 2
 	pad := 4
+	m.pickerList.SetSize(max1(m.width-pad, 20), max1(pickerBodyH-2, 6))
 
-	m.pickerList.SetSize(max1(m.width-pad, 20), max1(bodyH-2, 6))
-
+	// Sessions view: search input (3 lines incl. border) + body + 1-line help.
+	sessionBodyH := m.height - 5
 	leftW := m.width / 2
 	rightW := m.width - leftW
-	m.list.SetSize(max1(leftW-pad, 10), max1(bodyH-2, 6))
+	m.list.SetSize(max1(leftW-pad, 10), max1(sessionBodyH-2, 6))
 	m.preview.Width = max1(rightW-pad, 10)
-	m.preview.Height = max1(bodyH-2, 6)
+	m.preview.Height = max1(sessionBodyH-2, 6)
+	m.searchInput.Width = max1(m.width-10, 20)
 }
 
 func max1(a, b int) int {
