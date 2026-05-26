@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -167,6 +168,117 @@ func (d *DB) TouchProject(id int64) error {
 func (d *DB) RemoveProject(id int64) error {
 	_, err := d.sqldb.Exec(`DELETE FROM projects WHERE id = ?`, id)
 	return err
+}
+
+func (d *DB) RenameProject(id int64, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("project name cannot be empty")
+	}
+	_, err := d.sqldb.Exec(`UPDATE projects SET name = ? WHERE id = ?`, name, id)
+	return err
+}
+
+// MoveProjectUp / MoveProjectDown reorder the projects list by swapping
+// sort_order with the adjacent project. The first reorder backfills all
+// projects' sort_order with their current display position (so future
+// moves are simple swaps).
+func (d *DB) MoveProjectUp(id int64) error   { return d.moveProject(id, -1) }
+func (d *DB) MoveProjectDown(id int64) error { return d.moveProject(id, 1) }
+
+func (d *DB) moveProject(id int64, delta int) error {
+	if err := d.ensureAllPinned(); err != nil {
+		return err
+	}
+	var current sql.NullInt64
+	if err := d.sqldb.QueryRow(
+		`SELECT sort_order FROM projects WHERE id = ?`, id,
+	).Scan(&current); err != nil {
+		return err
+	}
+	if !current.Valid {
+		return fmt.Errorf("project not found or not pinned")
+	}
+	op, orderBy := "<", "DESC"
+	if delta > 0 {
+		op, orderBy = ">", "ASC"
+	}
+	var neighborID int64
+	var neighborOrder int64
+	q := fmt.Sprintf(
+		`SELECT id, sort_order FROM projects
+           WHERE sort_order %s ?
+        ORDER BY sort_order %s LIMIT 1`, op, orderBy,
+	)
+	err := d.sqldb.QueryRow(q, current.Int64).Scan(&neighborID, &neighborOrder)
+	if err == sql.ErrNoRows {
+		return nil // at the edge; no-op
+	}
+	if err != nil {
+		return err
+	}
+	tx, err := d.sqldb.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE projects SET sort_order = ? WHERE id = ?`, neighborOrder, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE projects SET sort_order = ? WHERE id = ?`, current.Int64, neighborID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ensureAllPinned backfills sort_order for any project that lacks one,
+// numbering rows in current display order with a step of 10 so future
+// inserts can squeeze in if we ever need them to.
+func (d *DB) ensureAllPinned() error {
+	var nullCount int
+	if err := d.sqldb.QueryRow(
+		`SELECT COUNT(*) FROM projects WHERE sort_order IS NULL`,
+	).Scan(&nullCount); err != nil {
+		return err
+	}
+	if nullCount == 0 {
+		return nil
+	}
+	rows, err := d.sqldb.Query(`
+        SELECT id FROM projects
+         ORDER BY
+            (sort_order IS NULL) ASC,
+            sort_order ASC,
+            last_used_at DESC NULLS LAST,
+            added_at DESC
+    `)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var pid int64
+		if err := rows.Scan(&pid); err != nil {
+			return err
+		}
+		ids = append(ids, pid)
+	}
+	rows.Close()
+	tx, err := d.sqldb.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for i, pid := range ids {
+		if _, err := tx.Exec(
+			`UPDATE projects SET sort_order = ? WHERE id = ?`,
+			(i+1)*10, pid,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func canonicalProjectPath(p string) string {

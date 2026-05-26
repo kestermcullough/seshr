@@ -24,6 +24,22 @@ const (
 	modeSessions
 )
 
+// ── Picker prompts ──────────────────────────────────────────────────────────
+
+type pickerPromptKind int
+
+const (
+	promptNone pickerPromptKind = iota
+	promptRename
+	promptDeleteConfirm
+)
+
+type pickerPromptState struct {
+	kind   pickerPromptKind
+	target Project
+	input  textinput.Model
+}
+
 // ── Picker items ────────────────────────────────────────────────────────────
 
 type pickerKind int
@@ -159,6 +175,9 @@ type tuiModel struct {
 	// add-project modal
 	addProject addProjectState
 
+	// inline picker prompts (rename / delete confirm)
+	prompt pickerPromptState
+
 	// sessions
 	list         list.Model
 	preview      viewport.Model
@@ -199,6 +218,9 @@ func newTUI(db *DB) tuiModel {
 	si.Prompt = "🔍 "
 	si.CharLimit = 256
 
+	promptInput := textinput.New()
+	promptInput.CharLimit = 128
+
 	return tuiModel{
 		db:          db,
 		mode:        modePicker,
@@ -207,6 +229,7 @@ func newTUI(db *DB) tuiModel {
 		preview:     vp,
 		searchInput: si,
 		addProject:  newAddProject(db),
+		prompt:      pickerPromptState{input: promptInput},
 	}
 }
 
@@ -345,6 +368,11 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── Picker mode ─────────────────────────────────────────────────────────────
 
 func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Inline prompts (rename input, delete confirm) consume input first.
+	if m.prompt.kind != promptNone {
+		return m.updatePickerPrompt(msg)
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if m.pickerList.FilterState() == list.Filtering {
@@ -353,23 +381,113 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			break
 		}
+		sel, selOK := m.pickerList.SelectedItem().(pickerItem)
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			return m, tea.Quit
 		case "enter":
-			if it, ok := m.pickerList.SelectedItem().(pickerItem); ok {
-				if it.kind != pickerAdd {
+			if selOK {
+				if sel.kind != pickerAdd {
 					m.status = "scanning…"
 				}
-				return m.handlePickerEnter(it)
+				return m.handlePickerEnter(sel)
 			}
 		case "+":
 			return m.enterAddMode("")
+		case "r":
+			if selOK && sel.kind == pickerSaved {
+				m.prompt.kind = promptRename
+				m.prompt.target = sel.project
+				m.prompt.input.SetValue(sel.project.Name)
+				m.prompt.input.CursorEnd()
+				m.prompt.input.Focus()
+				return m, textinput.Blink
+			}
+		case "d":
+			if selOK && sel.kind == pickerSaved {
+				m.prompt.kind = promptDeleteConfirm
+				m.prompt.target = sel.project
+				return m, nil
+			}
+		case "J":
+			if selOK && sel.kind == pickerSaved {
+				if err := m.db.MoveProjectDown(sel.project.ID); err != nil {
+					m.status = "move failed: " + err.Error()
+				} else {
+					m.status = "moved down"
+				}
+				return m, m.loadProjectsCmd()
+			}
+		case "K":
+			if selOK && sel.kind == pickerSaved {
+				if err := m.db.MoveProjectUp(sel.project.ID); err != nil {
+					m.status = "move failed: " + err.Error()
+				} else {
+					m.status = "moved up"
+				}
+				return m, m.loadProjectsCmd()
+			}
 		}
 	}
 	var cmd tea.Cmd
 	m.pickerList, cmd = m.pickerList.Update(msg)
 	return m, cmd
+}
+
+func (m tuiModel) updatePickerPrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
+	km, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch m.prompt.kind {
+	case promptRename:
+		switch km.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.prompt.kind = promptNone
+			m.prompt.input.Blur()
+			return m, nil
+		case "enter":
+			newName := strings.TrimSpace(m.prompt.input.Value())
+			if newName == "" {
+				m.status = "name cannot be empty"
+				return m, nil
+			}
+			if err := m.db.RenameProject(m.prompt.target.ID, newName); err != nil {
+				m.status = "rename failed: " + err.Error()
+				return m, nil
+			}
+			m.status = "renamed to " + newName
+			m.prompt.kind = promptNone
+			m.prompt.input.Blur()
+			return m, m.loadProjectsCmd()
+		}
+		var cmd tea.Cmd
+		m.prompt.input, cmd = m.prompt.input.Update(msg)
+		return m, cmd
+
+	case promptDeleteConfirm:
+		switch km.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "y", "Y":
+			name := m.prompt.target.Name
+			if err := m.db.RemoveProject(m.prompt.target.ID); err != nil {
+				m.status = "delete failed: " + err.Error()
+				m.prompt.kind = promptNone
+				return m, nil
+			}
+			m.status = "removed " + name
+			m.prompt.kind = promptNone
+			return m, m.loadProjectsCmd()
+		case "n", "N", "esc":
+			m.prompt.kind = promptNone
+			m.status = ""
+			return m, nil
+		}
+	}
+	return m, nil
 }
 
 func (m tuiModel) handlePickerEnter(it pickerItem) (tea.Model, tea.Cmd) {
@@ -694,7 +812,24 @@ func (m tuiModel) View() string {
 func (m tuiModel) viewPicker() string {
 	border := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).BorderForeground(lipgloss.Color("240"))
 	body := border.Render(m.pickerList.View())
-	keys := "↑/↓ select · enter open · + add · / filter · q quit"
+
+	if m.prompt.kind != promptNone {
+		var promptLine string
+		switch m.prompt.kind {
+		case promptRename:
+			label := lipgloss.NewStyle().Bold(true).Render("rename → ")
+			promptLine = label + m.prompt.input.View() +
+				lipgloss.NewStyle().Faint(true).Render("    enter save · esc cancel")
+		case promptDeleteConfirm:
+			redStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "160", Dark: "203"}).Bold(true)
+			promptLine = redStyle.Render(
+				fmt.Sprintf("remove project '%s'?", m.prompt.target.Name)) +
+				lipgloss.NewStyle().Faint(true).Render("    y confirm · n/esc cancel")
+		}
+		return lipgloss.JoinVertical(lipgloss.Left, body, promptLine)
+	}
+
+	keys := "↑/↓ select · enter open · + add · r rename · d remove · J/K reorder · / filter · q quit"
 	return lipgloss.JoinVertical(lipgloss.Left, body, statusLine(m.status, keys))
 }
 
