@@ -32,7 +32,14 @@ Claude version landed (reads `~/.claude/sessions/*.json` pid sidecars). Three si
 
 When live for any tool: same UI badge, same fork-on-resume behavior where the tool supports it (Codex/Pi don't have a `--fork-session` equivalent — we'd just warn and resume anyway).
 
-## 5. Project picker — remaining polish
+## 5. Settings — in-TUI screen
+
+`seshr settings` CLI subcommand shipped (lists retention per tool; sets Claude's `cleanupPeriodDays`). Follow-ups:
+- A TUI screen (key `S` from the picker) that shows the same report and lets the user edit Claude's value inline — no terminal-context-switch
+- Detect Claude's setting on launch and offer a one-keystroke "raise it now" prompt instead of just a stderr warning
+- (Stretch) write the same setting to all detected Claude config locations (project `.claude/settings.json`, etc.) — currently only touches `~/.claude/settings.json`
+
+## 6. Project picker — remaining polish
 
 Rename / remove / reorder landed. Still:
 - "Save as project?" prompt when entering Current dir without a matching saved project
