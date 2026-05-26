@@ -22,6 +22,7 @@ const (
 	modePicker tuiMode = iota
 	modeAddProject
 	modeSessions
+	modeInfo
 )
 
 // ── Picker prompts ──────────────────────────────────────────────────────────
@@ -210,6 +211,14 @@ type tuiModel struct {
 	// refresh later if we ever want it live).
 	cleanupWarning string
 
+	// cacheStats is seshr's own disk usage (DB + Amp content cache),
+	// refreshed each time projects are loaded so the bottom-bar number
+	// stays roughly in sync as the Amp cache grows.
+	cacheStats CacheStats
+
+	// agentStorage is computed on demand when the info modal opens.
+	agentStorage []AgentStorageStat
+
 	// sessions
 	list         list.Model
 	preview      viewport.Model
@@ -270,6 +279,7 @@ func newTUI(db *DB) tuiModel {
 		prompt:      pickerPromptState{input: promptInput},
 	}
 	m.cleanupWarning = computeCleanupWarning()
+	m.cacheStats = seshrCacheStats()
 	return m
 }
 
@@ -358,6 +368,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case projectsLoadedMsg:
 		m.applyProjects(msg.projects)
+		m.cacheStats = seshrCacheStats() // keep the picker's footer in sync
 		return m, nil
 
 	case sessionsLoadedMsg:
@@ -412,6 +423,22 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateAddProject(msg)
 	case modeSessions:
 		return m.updateSessions(msg)
+	case modeInfo:
+		return m.updateInfo(msg)
+	}
+	return m, nil
+}
+
+// updateInfo handles the disk-usage modal: any of esc/i/q/ctrl+c dismisses it.
+func (m tuiModel) updateInfo(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if km, ok := msg.(tea.KeyMsg); ok {
+		switch km.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc", "q", "i":
+			m.mode = modePicker
+			return m, nil
+		}
 	}
 	return m, nil
 }
@@ -480,6 +507,12 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, m.loadProjectsCmd()
 			}
+		case "i":
+			// Compute agent-storage stats on demand (walks tool dirs once).
+			m.agentStorage = agentStorageStats()
+			m.cacheStats = seshrCacheStats()
+			m.mode = modeInfo
+			return m, nil
 		}
 	}
 	var cmd tea.Cmd
@@ -999,6 +1032,8 @@ func (m tuiModel) View() string {
 		return m.viewAddProject()
 	case modeSessions:
 		return m.viewSessions()
+	case modeInfo:
+		return m.viewInfo()
 	}
 	return ""
 }
@@ -1023,20 +1058,69 @@ func (m tuiModel) viewPicker() string {
 		return lipgloss.JoinVertical(lipgloss.Left, body, promptLine)
 	}
 
-	keys := "↑/↓ select · enter open · + add · r rename · d remove · J/K reorder · / filter · q quit"
+	keys := "↑/↓ select · enter open · + add · r rename · d remove · J/K reorder · i info · / filter · q quit"
 	bottom := statusLine(m.status, keys)
-	if m.cleanupWarning != "" && m.width > 0 {
-		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "214"})
-		warning := warnStyle.Render(m.cleanupWarning)
-		gap := m.width - lipgloss.Width(bottom) - lipgloss.Width(warning)
+	right := m.bottomRightChips()
+	if right != "" && m.width > 0 {
+		gap := m.width - lipgloss.Width(bottom) - lipgloss.Width(right)
 		if gap >= 1 {
-			bottom = bottom + strings.Repeat(" ", gap) + warning
+			bottom = bottom + strings.Repeat(" ", gap) + right
 		} else {
-			// Not enough horizontal room — drop the warning onto its own line.
-			bottom = bottom + "\n" + warning
+			bottom = bottom + "\n" + right
 		}
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, body, bottom)
+}
+
+// bottomRightChips renders the right side of the picker's footer:
+// a faint "cache N" total, followed by the cleanup warning if active.
+func (m tuiModel) bottomRightChips() string {
+	faint := lipgloss.NewStyle().Faint(true)
+	var parts []string
+	if m.cacheStats.TotalBytes > 0 {
+		parts = append(parts, faint.Render(fmt.Sprintf("cache %s", humanSize(m.cacheStats.TotalBytes))))
+	}
+	if m.cleanupWarning != "" {
+		warn := lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "214"}).
+			Render(m.cleanupWarning)
+		parts = append(parts, warn)
+	}
+	return strings.Join(parts, faint.Render(" · "))
+}
+
+func (m tuiModel) viewInfo() string {
+	header := lipgloss.NewStyle().Bold(true).Render("Disk usage")
+	faint := lipgloss.NewStyle().Faint(true)
+	subHead := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "30", Dark: "36"})
+
+	var sb strings.Builder
+	sb.WriteString(header + "\n\n")
+
+	sb.WriteString(subHead.Render("seshr local cache") + "\n")
+	sb.WriteString(fmt.Sprintf("  metadata DB        %s\n", humanSize(m.cacheStats.DBBytes)))
+	sb.WriteString(fmt.Sprintf("  amp content cache  %s  %s\n",
+		humanSize(m.cacheStats.AmpCacheBytes),
+		faint.Render(fmt.Sprintf("(%d threads cached)", m.cacheStats.AmpCacheFiles))))
+	sb.WriteString(faint.Render("  ────────────────────────\n"))
+	sb.WriteString(fmt.Sprintf("  total              %s\n\n", humanSize(m.cacheStats.TotalBytes)))
+
+	sb.WriteString(subHead.Render("agent session storage") + faint.Render("   (managed by each tool)") + "\n")
+	for _, a := range m.agentStorage {
+		tool := renderToolLabel(a.Tool)
+		sb.WriteString(fmt.Sprintf("  %s %10s  %s\n",
+			tool, humanSize(a.Bytes),
+			faint.Render(fmt.Sprintf("%d files at %s", a.FileCount, a.Path))))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(faint.Render("esc/i/q  close"))
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(1, 2).
+		BorderForeground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}).
+		Render(sb.String())
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m tuiModel) viewAddProject() string {
