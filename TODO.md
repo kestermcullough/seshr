@@ -4,11 +4,15 @@ Living roadmap. Top of the list is "do next."
 
 ---
 
-## 1. Always-on search bar (sessions view)
+## 1. Live-session detection for Codex, Pi, Amp
 
-The brief was *"fully searchable fast smart search as you type"* — today `/` enters a modal filter mode, which isn't that. Refactor: an always-focused `textinput.Model` at the top of the sessions screen drives filtering directly. List items are filtered in our code (fuzzy match via `sahilm/fuzzy`, which we already depend on) and fed into `list.SetItems`.
+Claude version landed (reads `~/.claude/sessions/*.json` pid sidecars). Three siblings to consider:
 
-Side benefit: bubbles/list's built-in filter overlay goes away, freeing the `/` key for something else.
+- **Codex**: `~/.codex/sessions/...` is just JSONL — no sidecars. Could check open file handles via `/proc/<pid>/fd/*` or scan `ps -e` for `codex` processes and parse their argv for `--resume <uuid>`. Latter is cheaper and matches Claude's signal.
+- **Pi**: same story, scan `ps` for `pi --session <uuid>`/`pi --resume`.
+- **Amp**: locally nothing reliable; the API has the answer (active threads on server). Punt unless we want to ask the CLI.
+
+When live for any tool: same UI badge, same fork-on-resume behavior where the tool supports it (Codex/Pi don't have a `--fork-session` equivalent — we'd just warn and resume anyway).
 
 ## 2. Project picker — polish
 
@@ -17,39 +21,32 @@ Side benefit: bubbles/list's built-in filter overlay goes away, freeing the `/` 
 - Remove project (`d` with confirmation)
 - "Save as project?" prompt when entering Current dir with no saved project
 
-## 3. Add-project modal — refinements
+## 3. Sessions screen — remaining color polish
 
-- Show how many sessions live under the highlighted directory (live count — query DB on cursor change)
-- Show whether a dir already exists as a project (dimmed + tag)
-- Discovered-cwds shortcut: a small header showing cwds we've seen sessions in, ranked by recency. One Enter to add.
-- Toggle hidden dirs with a key (currently always hidden)
-- Optional rename step on save
-
-## 4. Sessions screen — more color
-
-Tool-name chips landed (orange/teal/purple/pink). Still:
-
-- Scope chip in the list title (`/home/kester/mainframe`) styled distinctly
-- Archived indicator on rows (dim + tag) — important when `--archived` is on
-- Missing indicator on rows
-- Status line: success green, error red
+Tool chips, archived/missing/live badges, and status colors landed. Still:
+- Scope chip in the list title styled distinctly
 - Selection highlight that respects the tool color of the selected row
+
+## 4. Quit shortcut in sessions view
+
+`q` types into the search bar now (intentional — as-you-type search). Currently `Esc` returns to picker; from picker, `q` quits. Consider:
+- `Esc Esc` to quit directly from sessions view
+- Or just live with the two-step flow
 
 ## 5. End-to-end resume test
 
-`syscall.Exec` paths are wired for all four tools but none have actually been triggered. Pick a throwaway session of each kind, verify the handoff feels clean (terminal state restored, alt-screen exited, parent process gone).
+`syscall.Exec` paths are wired for all four tools. Claude verified (this conversation's resume + fork-session path). Still need a hands-on:
+- Codex (`codex resume <uuid>`)
+- Amp (`amp threads continue T-<uuid>`)
+- Pi (`pi --session <uuid>`)
+- Edge case: alt-screen cleanup on resume failure (rename `claude` binary out of PATH temporarily and verify the terminal isn't left in a weird state)
 
 ## 6. Live refresh follow-ups
 
 5s tea.Tick polling for file-based tools shipped. Still open:
-
 - **mtime-skip** in the per-tick parse so we only re-read files that changed since last sync
 - **fsnotify** for true event-driven updates (WSL reliability is iffy — only if polling proves laggy)
 - Decide whether to ever poll Amp on a long cadence (current decision: no, R-only)
-
-## 7. Name the tool
-
-`agent-sessions` is a placeholder. Candidates: `agenda`, `threadwise`, `sessions`, `recall`, `mux`. Open to anything.
 
 ---
 
@@ -59,6 +56,7 @@ Tool-name chips landed (orange/teal/purple/pink). Still:
 - **Codex title quality.** Some Codex sessions start with pasted terminal output, which becomes a noisy "title." Could filter out shell-prompt patterns.
 - **Recently-opened sort boost.** Bump a session that was opened in the last hour.
 - **Double-click to resume.** Currently mouse selects but doesn't resume.
+- **Add-project modal extras.** Toggle hidden dirs key; optional rename step on save.
 - **Cross-tool actions.** Replay a Codex session in Claude. Out of scope.
 - **Multi-machine / sync.** Punt.
-- **Performance.** Re-parses every session file on each launch. With ~150 sessions it's ~1s; if it grows past ~1000 we'd want mtime-skip more urgently.
+- **Performance.** Re-parses every session file on each launch + tick. With ~150 sessions it's ~1s; if it grows past ~1000 we'd want mtime-skip more urgently.
