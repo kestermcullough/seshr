@@ -4,11 +4,12 @@ Living roadmap. Top of the list is "do next."
 
 ---
 
-## 1. Transcript-aware search hits
+## 1. Transcript-search follow-ups (basic version shipped)
 
-When the user is searching, the preview pane currently just shows the *last* user/assistant turn — which usually doesn't contain the search query. Instead, when there's an active query, scan the session's transcript for the most recent line containing the match and render that section (with matched substrings highlighted, same style as the list rows). For sessions with no transcript match (Amp without local cache, etc.) fall back to current behavior.
-
-This is the natural extension of the title/cwd highlighting that just landed.
+The preview now surfaces the most recent transcript turn containing every search token, with highlights. Follow-ups worth picking up later:
+- **Cache** match results per (session_id, query) so we don't re-scan files on every keystroke. With ~150 sessions and ~3 MB max per file, perceived perf is fine for now, but this would help if the corpus grows.
+- **Match navigation**: keys like `n` / `N` to step through earlier matches instead of jumping straight to the most recent. Sessions with many hits would benefit.
+- **More context**: show a turn or two before/after the match for orientation, not just the match in isolation.
 
 ## 2. Mouse — click-to-select and click-to-resume
 

@@ -372,7 +372,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.preview.SetContent(previewHeader(it.s) + "(amp fetch failed: " + msg.err.Error() + ")\n")
 			} else {
-				m.preview.SetContent(renderPreview(it.s))
+				m.preview.SetContent(renderPreview(it.s, m.currentTokens()))
 			}
 			m.preview.GotoTop()
 		}
@@ -613,7 +613,7 @@ func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.list.Index() != prev {
 				if it, ok := m.list.SelectedItem().(sessionItem); ok {
 					s := it.s
-					m.preview.SetContent(renderPreview(s))
+					m.preview.SetContent(renderPreview(s, m.currentTokens()))
 					m.preview.GotoTop()
 					if needsAmpFetch(s) {
 						cmd = tea.Batch(cmd, ampFetchCmd(s))
@@ -687,7 +687,7 @@ func (m tuiModel) navList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.list.Index() != prev {
 		if it, ok := m.list.SelectedItem().(sessionItem); ok {
 			s := it.s
-			m.preview.SetContent(renderPreview(s))
+			m.preview.SetContent(renderPreview(s, m.currentTokens()))
 			m.preview.GotoTop()
 			if needsAmpFetch(s) {
 				cmd = tea.Batch(cmd, ampFetchCmd(s))
@@ -819,9 +819,11 @@ func (m *tuiModel) refilterAndDisplay() tea.Cmd {
 		m.list.Select(keepIdx)
 		s := visible[keepIdx]
 		selected = &s
+		// Refresh preview to update transcript-match highlights as the user types.
+		m.preview.SetContent(renderPreview(s, tokens))
 	case len(visible) > 0:
 		m.list.Select(0)
-		m.preview.SetContent(renderPreview(visible[0]))
+		m.preview.SetContent(renderPreview(visible[0], tokens))
 		m.preview.GotoTop()
 		s := visible[0]
 		selected = &s
@@ -838,6 +840,12 @@ func (m *tuiModel) refilterAndDisplay() tea.Cmd {
 		return ampFetchCmd(*selected)
 	}
 	return nil
+}
+
+// currentTokens returns the active search tokens (lowercased, whitespace-split)
+// so callers can plumb them into renderPreview / highlight helpers.
+func (m tuiModel) currentTokens() []string {
+	return tokenize(m.searchInput.Value())
 }
 
 // tokenize splits the search query on whitespace and lowercases the result.

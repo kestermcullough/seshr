@@ -6,15 +6,23 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
-// renderPreview produces the right-pane content for a session. For local files
-// it reads the last user/assistant turns. For Amp threads with no local file,
-// it consults the per-thread cache (populated lazily by ampFetchCmd); cache
-// miss falls back to a header + first-message placeholder while the fetch
-// runs.
-func renderPreview(s Session) string {
+// renderPreview produces the right-pane content for a session. With an active
+// search query (tokens non-empty), it surfaces the most recent transcript
+// turn containing every token instead of the default last user/assistant
+// turn — so the preview shows you *why* this row matched. Falls back to the
+// default behavior when there's no query or no match in the transcript.
+func renderPreview(s Session, tokens []string) string {
 	header := previewHeader(s)
+
+	if len(tokens) > 0 {
+		if m := findTranscriptMatch(s, tokens); m.found {
+			return header + renderTranscriptMatch(m, tokens)
+		}
+	}
 
 	if s.Tool == "amp" && s.FilePath == "" {
 		if t, ok := ampThreadCached(s); ok {
@@ -41,6 +49,212 @@ func renderPreview(s Session) string {
 		return header + "(preview error: " + err.Error() + ")\n"
 	}
 	return header + renderTurnsBody(lastUser, lastAssistant, s.FirstMsg)
+}
+
+// transcriptMatch is the result of scanning a session's transcript for the
+// search query: the most recent turn containing every token.
+type transcriptMatch struct {
+	found bool
+	role  string // "user" | "assistant"
+	text  string
+	index int // 1-based turn index
+	total int // total counted turns
+}
+
+func renderTranscriptMatch(m transcriptMatch, tokens []string) string {
+	label := lipgloss.NewStyle().
+		Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "214"}).
+		Bold(true).
+		Render(fmt.Sprintf("⟡ search match · turn %d of %d", m.index, m.total))
+	role := "→ user"
+	if m.role == "assistant" {
+		role = "← assistant"
+	}
+	return label + "\n" + role + "\n" +
+		highlightTokens(truncate(m.text, 2500), tokens) + "\n"
+}
+
+func findTranscriptMatch(s Session, tokens []string) transcriptMatch {
+	if len(tokens) == 0 {
+		return transcriptMatch{}
+	}
+	switch s.Tool {
+	case "claude":
+		return findClaudeMatch(s, tokens)
+	case "codex":
+		return findCodexMatch(s, tokens)
+	case "amp":
+		return findAmpMatch(s, tokens)
+	case "pi":
+		return findPiMatch(s, tokens)
+	}
+	return transcriptMatch{}
+}
+
+func containsAllTokens(text string, tokens []string) bool {
+	lo := strings.ToLower(text)
+	for _, t := range tokens {
+		if !strings.Contains(lo, t) {
+			return false
+		}
+	}
+	return true
+}
+
+func findClaudeMatch(s Session, tokens []string) transcriptMatch {
+	if s.FilePath == "" {
+		return transcriptMatch{}
+	}
+	f, err := os.Open(s.FilePath)
+	if err != nil {
+		return transcriptMatch{}
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	var match transcriptMatch
+	turn := 0
+	for sc.Scan() {
+		var r claudeRecord
+		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+			continue
+		}
+		if r.Type != "user" && r.Type != "assistant" {
+			continue
+		}
+		var m claudeMessage
+		if err := json.Unmarshal(r.Message, &m); err != nil {
+			continue
+		}
+		txt := extractTextFromContent(m.Content)
+		if txt == "" {
+			continue
+		}
+		turn++
+		if containsAllTokens(txt, tokens) {
+			match = transcriptMatch{found: true, role: r.Type, text: txt, index: turn}
+		}
+	}
+	match.total = turn
+	return match
+}
+
+func findCodexMatch(s Session, tokens []string) transcriptMatch {
+	if s.FilePath == "" {
+		return transcriptMatch{}
+	}
+	f, err := os.Open(s.FilePath)
+	if err != nil {
+		return transcriptMatch{}
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	var match transcriptMatch
+	turn := 0
+	for sc.Scan() {
+		var r codexRecord
+		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+			continue
+		}
+		if r.Type != "event_msg" {
+			continue
+		}
+		var p codexEventPayload
+		if err := json.Unmarshal(r.Payload, &p); err != nil {
+			continue
+		}
+		if p.Type != "user_message" && p.Type != "agent_message" {
+			continue
+		}
+		if strings.TrimSpace(p.Message) == "" {
+			continue
+		}
+		role := "user"
+		if p.Type == "agent_message" {
+			role = "assistant"
+		}
+		turn++
+		if containsAllTokens(p.Message, tokens) {
+			match = transcriptMatch{found: true, role: role, text: p.Message, index: turn}
+		}
+	}
+	match.total = turn
+	return match
+}
+
+func findAmpMatch(s Session, tokens []string) transcriptMatch {
+	var t *ampThread
+	if s.FilePath != "" {
+		f, err := os.Open(s.FilePath)
+		if err == nil {
+			var tt ampThread
+			if json.NewDecoder(f).Decode(&tt) == nil {
+				t = &tt
+			}
+			f.Close()
+		}
+	}
+	if t == nil {
+		if cached, ok := ampThreadCached(s); ok {
+			t = cached
+		}
+	}
+	if t == nil {
+		return transcriptMatch{}
+	}
+	var match transcriptMatch
+	turn := 0
+	for _, m := range t.Messages {
+		txt := extractTextFromContent(m.Content)
+		if txt == "" {
+			continue
+		}
+		turn++
+		if containsAllTokens(txt, tokens) {
+			match = transcriptMatch{found: true, role: m.Role, text: txt, index: turn}
+		}
+	}
+	match.total = turn
+	return match
+}
+
+func findPiMatch(s Session, tokens []string) transcriptMatch {
+	if s.FilePath == "" {
+		return transcriptMatch{}
+	}
+	f, err := os.Open(s.FilePath)
+	if err != nil {
+		return transcriptMatch{}
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	var match transcriptMatch
+	turn := 0
+	for sc.Scan() {
+		var r piRecord
+		if err := json.Unmarshal(sc.Bytes(), &r); err != nil {
+			continue
+		}
+		if r.Type != "message" || len(r.Message) == 0 {
+			continue
+		}
+		var m piMessage
+		if err := json.Unmarshal(r.Message, &m); err != nil {
+			continue
+		}
+		txt := extractTextFromContent(m.Content)
+		if txt == "" {
+			continue
+		}
+		turn++
+		if containsAllTokens(txt, tokens) {
+			match = transcriptMatch{found: true, role: m.Role, text: txt, index: turn}
+		}
+	}
+	match.total = turn
+	return match
 }
 
 func previewHeader(s Session) string {
