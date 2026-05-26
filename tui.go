@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,7 +12,6 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/sahilm/fuzzy"
 )
 
 // ── Modes ───────────────────────────────────────────────────────────────────
@@ -47,6 +47,7 @@ type pickerKind int
 const (
 	pickerCurrent pickerKind = iota
 	pickerSaved
+	pickerSpacer
 	pickerAdd
 	pickerAll
 )
@@ -57,16 +58,26 @@ type pickerItem struct {
 	cwd     string  // valid when kind == pickerCurrent
 }
 
+// Style chips for synthetic picker rows so the user-added projects read as
+// the primary content and the action/sentinel rows recede.
+var (
+	pickerDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"})
+	pickerActionStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}).Italic(true)
+	pickerSavedStyle  = lipgloss.NewStyle().Bold(true)
+)
+
 func (i pickerItem) Title() string {
 	switch i.kind {
 	case pickerCurrent:
-		return "● Current dir"
+		return pickerDimStyle.Render("● Current dir")
 	case pickerSaved:
-		return i.project.Name
+		return pickerSavedStyle.Render(i.project.Name)
+	case pickerSpacer:
+		return ""
 	case pickerAdd:
-		return "+ Add project"
+		return pickerActionStyle.Render("+ Add project")
 	case pickerAll:
-		return "○ All sessions"
+		return pickerActionStyle.Render("○ All sessions")
 	}
 	return "?"
 }
@@ -75,20 +86,27 @@ func (i pickerItem) Description() string {
 	switch i.kind {
 	case pickerCurrent:
 		if i.cwd == "" {
-			return "(could not detect cwd)"
+			return pickerDimStyle.Render("(could not detect cwd)")
 		}
-		return i.cwd
+		return pickerDimStyle.Render(i.cwd)
 	case pickerSaved:
 		return i.project.Path
+	case pickerSpacer:
+		return ""
 	case pickerAdd:
-		return "save the current dir or another path as a project"
+		return pickerDimStyle.Render("save the current dir or another path as a project")
 	case pickerAll:
-		return "every session across every cwd"
+		return pickerDimStyle.Render("every session across every cwd")
 	}
 	return ""
 }
 
-func (i pickerItem) FilterValue() string { return i.Title() + " " + i.Description() }
+func (i pickerItem) FilterValue() string {
+	if i.kind == pickerSpacer {
+		return "" // exclude from filter results
+	}
+	return i.Title() + " " + i.Description()
+}
 
 // ── Session items ───────────────────────────────────────────────────────────
 
@@ -112,14 +130,17 @@ func renderToolLabel(tool string) string {
 	return style.Render(label)
 }
 
-type sessionItem struct{ s Session }
+type sessionItem struct {
+	s      Session
+	tokens []string // active search tokens, used to highlight matches inline
+}
 
 func (i sessionItem) Title() string {
 	t := i.s.Title
 	if t == "" {
 		t = "(no title)"
 	}
-	return renderToolLabel(i.s.Tool) + " " + t
+	return renderToolLabel(i.s.Tool) + " " + highlightTokens(t, i.tokens)
 }
 
 // Badge styles for archived/missing/live markers in the row description.
@@ -155,7 +176,7 @@ func (i sessionItem) Description() string {
 	} else if i.s.Archived {
 		parts = append(parts, archivedBadge)
 	}
-	parts = append(parts, when, cwd)
+	parts = append(parts, when, highlightTokens(cwd, i.tokens))
 	return strings.Join(parts, "  ")
 }
 
@@ -178,6 +199,11 @@ type tuiModel struct {
 	// inline picker prompts (rename / delete confirm)
 	prompt pickerPromptState
 
+	// pendingFocusProjectID, when non-zero, makes the next applyProjects
+	// move the picker cursor onto that project (used for J/K reorder so
+	// the cursor follows the moved row).
+	pendingFocusProjectID int64
+
 	// sessions
 	list         list.Model
 	preview      viewport.Model
@@ -193,7 +219,13 @@ type tuiModel struct {
 }
 
 func newTUI(db *DB) tuiModel {
-	pl := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	pickerDelegate := list.NewDefaultDelegate()
+	// Unset the delegate's title/desc foreground so per-item ANSI styling
+	// in pickerItem.Title/Description survives (dim/italic for synthetic
+	// rows, bold for saved projects).
+	pickerDelegate.Styles.NormalTitle = pickerDelegate.Styles.NormalTitle.UnsetForeground()
+	pickerDelegate.Styles.NormalDesc = pickerDelegate.Styles.NormalDesc.UnsetForeground()
+	pl := list.New(nil, pickerDelegate, 0, 0)
 	pl.Title = "Agent Sessions"
 	pl.SetShowStatusBar(false)
 	pl.SetFilteringEnabled(true)
@@ -415,6 +447,7 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "move failed: " + err.Error()
 				} else {
 					m.status = "moved down"
+					m.pendingFocusProjectID = sel.project.ID
 				}
 				return m, m.loadProjectsCmd()
 			}
@@ -424,6 +457,7 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "move failed: " + err.Error()
 				} else {
 					m.status = "moved up"
+					m.pendingFocusProjectID = sel.project.ID
 				}
 				return m, m.loadProjectsCmd()
 			}
@@ -505,6 +539,9 @@ func (m tuiModel) handlePickerEnter(it pickerItem) (tea.Model, tea.Cmd) {
 		return m.enterAddMode(cwd)
 	case pickerAll:
 		return m, m.loadSessionsCmd(QueryFilter{}, 0)
+	case pickerSpacer:
+		// Visual divider; Enter is a no-op.
+		return m, nil
 	}
 	return m, nil
 }
@@ -565,6 +602,30 @@ func (m tuiModel) updateAddProject(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── Sessions mode ───────────────────────────────────────────────────────────
 
 func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Mouse events: route by horizontal position. Wheel/click on the left
+	// half goes to the list (cursor/scroll), right half goes to the
+	// preview viewport.
+	if mm, ok := msg.(tea.MouseMsg); ok {
+		var cmd tea.Cmd
+		if mm.X < m.width/2 {
+			prev := m.list.Index()
+			m.list, cmd = m.list.Update(mm)
+			if m.list.Index() != prev {
+				if it, ok := m.list.SelectedItem().(sessionItem); ok {
+					s := it.s
+					m.preview.SetContent(renderPreview(s))
+					m.preview.GotoTop()
+					if needsAmpFetch(s) {
+						cmd = tea.Batch(cmd, ampFetchCmd(s))
+					}
+				}
+			}
+		} else {
+			m.preview, cmd = m.preview.Update(mm)
+		}
+		return m, cmd
+	}
+
 	if km, ok := msg.(tea.KeyMsg); ok {
 		switch km.String() {
 		case "ctrl+c":
@@ -698,14 +759,27 @@ func (m tuiModel) softRefreshCmd() tea.Cmd {
 func (m *tuiModel) applyProjects(projects []Project) {
 	cwd, _ := os.Getwd()
 	items := []list.Item{pickerItem{kind: pickerCurrent, cwd: cwd}}
+	focusIdx := -1
 	for _, p := range projects {
+		idx := len(items)
 		items = append(items, pickerItem{kind: pickerSaved, project: p})
+		if m.pendingFocusProjectID != 0 && p.ID == m.pendingFocusProjectID {
+			focusIdx = idx
+		}
+	}
+	// A blank row visually separates saved projects from the action rows below.
+	if len(projects) > 0 {
+		items = append(items, pickerItem{kind: pickerSpacer})
 	}
 	items = append(items,
 		pickerItem{kind: pickerAdd},
 		pickerItem{kind: pickerAll},
 	)
 	m.pickerList.SetItems(items)
+	if focusIdx >= 0 {
+		m.pickerList.Select(focusIdx)
+	}
+	m.pendingFocusProjectID = 0
 }
 
 // applySessions stores the unfiltered set and then renders the visible slice
@@ -727,10 +801,11 @@ func (m *tuiModel) refilterAndDisplay() tea.Cmd {
 		prevID = it.s.ID()
 	}
 
+	tokens := tokenize(m.searchInput.Value())
 	items := make([]list.Item, len(visible))
 	keepIdx := -1
 	for i, s := range visible {
-		items[i] = sessionItem{s: s}
+		items[i] = sessionItem{s: s, tokens: tokens}
 		if prevID != "" && s.ID() == prevID {
 			keepIdx = i
 		}
@@ -765,23 +840,115 @@ func (m *tuiModel) refilterAndDisplay() tea.Cmd {
 	return nil
 }
 
-// filterSessions returns the fuzzy-matched subset of all in score order.
-// Matching is over "title cwd tool first-message" concatenated per session.
-func filterSessions(all []Session, query string) []Session {
-	q := strings.TrimSpace(query)
+// tokenize splits the search query on whitespace and lowercases the result.
+// An empty/whitespace query yields nil.
+func tokenize(q string) []string {
+	q = strings.TrimSpace(q)
 	if q == "" {
-		return all
+		return nil
 	}
-	items := make([]string, len(all))
-	for i, s := range all {
-		items[i] = s.Title + " " + s.CWD + " " + s.Tool + " " + s.FirstMsg
-	}
-	matches := fuzzy.Find(q, items)
-	out := make([]Session, len(matches))
-	for i, mm := range matches {
-		out[i] = all[mm.Index]
+	parts := strings.Fields(q)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, strings.ToLower(p))
 	}
 	return out
+}
+
+// filterSessions returns sessions that contain *every* search token as a
+// case-insensitive substring of (title cwd tool first-message), ranked by the
+// earliest token-match position. This is tighter than fuzzy character-skip
+// matching, which was returning too many irrelevant hits.
+func filterSessions(all []Session, query string) []Session {
+	tokens := tokenize(query)
+	if len(tokens) == 0 {
+		return all
+	}
+	type scored struct {
+		s   Session
+		pos int
+	}
+	var matches []scored
+	for _, s := range all {
+		hay := strings.ToLower(s.Title + " " + s.CWD + " " + s.Tool + " " + s.FirstMsg)
+		minPos := -1
+		ok := true
+		for _, t := range tokens {
+			idx := strings.Index(hay, t)
+			if idx < 0 {
+				ok = false
+				break
+			}
+			if minPos < 0 || idx < minPos {
+				minPos = idx
+			}
+		}
+		if ok {
+			matches = append(matches, scored{s: s, pos: minPos})
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].pos < matches[j].pos })
+	out := make([]Session, len(matches))
+	for i, m := range matches {
+		out[i] = m.s
+	}
+	return out
+}
+
+// highlightTokens wraps every case-insensitive occurrence of each token in
+// text with an underlined, bold, orange style. Overlapping ranges are merged
+// so the output is well-formed.
+var matchHighlightStyle = lipgloss.NewStyle().
+	Underline(true).
+	Bold(true).
+	Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "214"})
+
+func highlightTokens(text string, tokens []string) string {
+	if text == "" || len(tokens) == 0 {
+		return text
+	}
+	type rng struct{ s, e int }
+	var ranges []rng
+	lo := strings.ToLower(text)
+	for _, t := range tokens {
+		if t == "" {
+			continue
+		}
+		start := 0
+		for {
+			idx := strings.Index(lo[start:], t)
+			if idx < 0 {
+				break
+			}
+			abs := start + idx
+			ranges = append(ranges, rng{abs, abs + len(t)})
+			start = abs + len(t)
+		}
+	}
+	if len(ranges) == 0 {
+		return text
+	}
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].s < ranges[j].s })
+	merged := []rng{ranges[0]}
+	for _, r := range ranges[1:] {
+		last := &merged[len(merged)-1]
+		if r.s <= last.e {
+			if r.e > last.e {
+				last.e = r.e
+			}
+		} else {
+			merged = append(merged, r)
+		}
+	}
+	var sb strings.Builder
+	prev := 0
+	for _, r := range merged {
+		sb.WriteString(text[prev:r.s])
+		sb.WriteString(matchHighlightStyle.Render(text[r.s:r.e]))
+		prev = r.e
+	}
+	sb.WriteString(text[prev:])
+	return sb.String()
 }
 
 func listTitle(f QueryFilter, n int) string {

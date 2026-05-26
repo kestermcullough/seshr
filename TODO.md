@@ -4,7 +4,24 @@ Living roadmap. Top of the list is "do next."
 
 ---
 
-## 1. Live-session detection for Codex, Pi, Amp
+## 1. Transcript-aware search hits
+
+When the user is searching, the preview pane currently just shows the *last* user/assistant turn — which usually doesn't contain the search query. Instead, when there's an active query, scan the session's transcript for the most recent line containing the match and render that section (with matched substrings highlighted, same style as the list rows). For sessions with no transcript match (Amp without local cache, etc.) fall back to current behavior.
+
+This is the natural extension of the title/cwd highlighting that just landed.
+
+## 2. Mouse — click-to-select and click-to-resume
+
+Mouse-wheel scrolling is now routed (left pane scrolls list, right scrolls preview). Still missing:
+- **Click a row** to select it (bubbles/list doesn't do this by default — needs custom delegate or a translate-click-to-cursor helper)
+- **Double-click** a row to resume (would need debounce tracking; ~300ms window)
+- Click on the search input to focus / clear (already focused, but explicit click is more discoverable)
+
+## 3. Picker spacer is selectable
+
+The blank row that separates saved projects from the action rows is currently a selectable list item that Enter no-ops on. Should be skipped during j/k navigation entirely. Needs a custom list delegate or a wrapper that auto-advances when the cursor lands on a spacer.
+
+## 4. Live-session detection for Codex, Pi, Amp
 
 Claude version landed (reads `~/.claude/sessions/*.json` pid sidecars). Three siblings to consider:
 
@@ -14,12 +31,10 @@ Claude version landed (reads `~/.claude/sessions/*.json` pid sidecars). Three si
 
 When live for any tool: same UI badge, same fork-on-resume behavior where the tool supports it (Codex/Pi don't have a `--fork-session` equivalent — we'd just warn and resume anyway).
 
-## 2. Project picker — polish
+## 5. Project picker — remaining polish
 
-- Manual reorder (`J`/`K` to push pinned rows up/down → writes `sort_order`)
-- Rename project (`r`)
-- Remove project (`d` with confirmation)
-- "Save as project?" prompt when entering Current dir with no saved project
+Rename / remove / reorder landed. Still:
+- "Save as project?" prompt when entering Current dir without a matching saved project
 
 ## 3. Sessions screen — remaining color polish
 
