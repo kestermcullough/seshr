@@ -204,6 +204,12 @@ type tuiModel struct {
 	// the cursor follows the moved row).
 	pendingFocusProjectID int64
 
+	// cleanupWarning, when non-empty, is rendered at the bottom-right of
+	// the picker as a subtle reminder that one of the agents is
+	// auto-pruning sessions. Populated once at TUI launch (cheap to
+	// refresh later if we ever want it live).
+	cleanupWarning string
+
 	// sessions
 	list         list.Model
 	preview      viewport.Model
@@ -253,7 +259,7 @@ func newTUI(db *DB) tuiModel {
 	promptInput := textinput.New()
 	promptInput.CharLimit = 128
 
-	return tuiModel{
+	m := tuiModel{
 		db:          db,
 		mode:        modePicker,
 		pickerList:  pl,
@@ -263,6 +269,19 @@ func newTUI(db *DB) tuiModel {
 		addProject:  newAddProject(db),
 		prompt:      pickerPromptState{input: promptInput},
 	}
+	m.cleanupWarning = computeCleanupWarning()
+	return m
+}
+
+// computeCleanupWarning returns the short text shown at the picker's
+// bottom-right corner when any agent has aggressive auto-pruning enabled.
+// Empty string means "nothing to warn about, don't render."
+func computeCleanupWarning() string {
+	days, _, err := ClaudeCleanupPeriodDays()
+	if err != nil || days <= 0 || days >= claudeCleanupWarnThreshold {
+		return ""
+	}
+	return fmt.Sprintf("⚠ claude auto-prunes after %dd · seshr settings claude-cleanup-days 365", days)
 }
 
 func (m tuiModel) Init() tea.Cmd {
@@ -1005,7 +1024,19 @@ func (m tuiModel) viewPicker() string {
 	}
 
 	keys := "↑/↓ select · enter open · + add · r rename · d remove · J/K reorder · / filter · q quit"
-	return lipgloss.JoinVertical(lipgloss.Left, body, statusLine(m.status, keys))
+	bottom := statusLine(m.status, keys)
+	if m.cleanupWarning != "" && m.width > 0 {
+		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "214"})
+		warning := warnStyle.Render(m.cleanupWarning)
+		gap := m.width - lipgloss.Width(bottom) - lipgloss.Width(warning)
+		if gap >= 1 {
+			bottom = bottom + strings.Repeat(" ", gap) + warning
+		} else {
+			// Not enough horizontal room — drop the warning onto its own line.
+			bottom = bottom + "\n" + warning
+		}
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, body, bottom)
 }
 
 func (m tuiModel) viewAddProject() string {
