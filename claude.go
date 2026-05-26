@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -35,6 +36,7 @@ func discoverClaude() ([]Session, []error) {
 		}
 		return nil, []error{err}
 	}
+	live := claudeLiveSessions()
 	for _, projEnt := range entries {
 		if !projEnt.IsDir() {
 			continue
@@ -56,10 +58,61 @@ func discoverClaude() ([]Session, []error) {
 				errs = append(errs, perr)
 				continue
 			}
+			if live[sess.SessionUUID] {
+				sess.Live = true
+			}
 			sessions = append(sessions, sess)
 		}
 	}
 	return sessions, errs
+}
+
+// claudeLiveSessions reads ~/.claude/sessions/*.json sidecars (one per
+// claude process) and returns the set of sessionIds whose owning PID is
+// still alive. Used to mark "open in another terminal" so the user doesn't
+// try to --resume a locked session.
+func claudeLiveSessions() map[string]bool {
+	out := map[string]bool{}
+	dir := filepath.Join(homeDir(), ".claude", "sessions")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	type sidecar struct {
+		PID       int    `json:"pid"`
+		SessionID string `json:"sessionId"`
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var s sidecar
+		if err := json.Unmarshal(data, &s); err != nil {
+			continue
+		}
+		if s.PID <= 0 || s.SessionID == "" {
+			continue
+		}
+		if pidAlive(s.PID) {
+			out[s.SessionID] = true
+		}
+	}
+	return out
+}
+
+// pidAlive reports whether a process with the given PID exists. Uses the
+// POSIX trick of signal 0 — checks for permission/existence without sending
+// anything.
+func pidAlive(pid int) bool {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
 }
 
 func parseClaudeFile(fp string) (Session, error) {

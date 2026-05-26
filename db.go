@@ -72,6 +72,16 @@ func (d *DB) migrate() error {
 			return err
 		}
 	}
+	// sessions.live column added later — backfilled to 0 by discovery sync.
+	hasLive, err := d.columnExists("sessions", "live")
+	if err != nil {
+		return err
+	}
+	if !hasLive {
+		if _, err := d.sqldb.Exec(`ALTER TABLE sessions ADD COLUMN live INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
 	// 2. Backfill real_path for any row that's missing it. Best-effort: a
 	//    broken or missing path falls back to the user-typed path.
 	rows, err := d.sqldb.Query(
@@ -139,6 +149,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     first_msg     TEXT,
     archived      INTEGER NOT NULL DEFAULT 0,
     missing       INTEGER NOT NULL DEFAULT 0,
+    live          INTEGER NOT NULL DEFAULT 0,
     opened_at     INTEGER,
     open_count    INTEGER NOT NULL DEFAULT 0,
     indexed_at    INTEGER NOT NULL
@@ -200,8 +211,8 @@ func (d *DB) SyncSessionsScoped(discovered []Session, scope []string) error {
         INSERT INTO sessions (
             id, tool, session_uuid, file_path, file_size,
             cwd, started_at, last_active, title, title_source, first_msg,
-            indexed_at, missing
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0)
+            indexed_at, missing, live
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?)
         ON CONFLICT(id) DO UPDATE SET
             tool         = excluded.tool,
             session_uuid = excluded.session_uuid,
@@ -214,7 +225,8 @@ func (d *DB) SyncSessionsScoped(discovered []Session, scope []string) error {
             title_source = excluded.title_source,
             first_msg    = excluded.first_msg,
             indexed_at   = excluded.indexed_at,
-            missing      = 0
+            missing      = 0,
+            live         = excluded.live
     `)
 	if err != nil {
 		return err
@@ -234,11 +246,15 @@ func (d *DB) SyncSessionsScoped(discovered []Session, scope []string) error {
 		title := nullStr(s.Title)
 		titleSrc := nullStr(s.TitleSource)
 		firstMsg := nullStr(s.FirstMsg)
+		liveFlag := 0
+		if s.Live {
+			liveFlag = 1
+		}
 
 		if _, err := stmt.Exec(
 			s.ID(), s.Tool, s.SessionUUID, filePath, s.Size,
 			cwd, startedAt, lastActive, title, titleSrc, firstMsg,
-			now,
+			now, liveFlag,
 		); err != nil {
 			return fmt.Errorf("upsert %s: %w", s.ID(), err)
 		}
@@ -257,7 +273,7 @@ type QueryFilter struct {
 func (d *DB) Query(f QueryFilter) ([]Session, error) {
 	q := `SELECT id, tool, session_uuid, file_path, file_size, cwd,
                  started_at, last_active, title, title_source, first_msg,
-                 archived, missing, opened_at, open_count
+                 archived, missing, live, opened_at, open_count
             FROM sessions
            WHERE 1=1`
 	args := []any{}
@@ -282,20 +298,20 @@ func (d *DB) Query(f QueryFilter) ([]Session, error) {
 	var out []Session
 	for rows.Next() {
 		var (
-			s              Session
-			filePath, cwd  sql.NullString
-			title, tSrc    sql.NullString
-			firstMsg       sql.NullString
-			startedAt, la  sql.NullInt64
-			openedAt       sql.NullInt64
-			archived, miss int
-			openCount      int
-			_id            string
+			s                    Session
+			filePath, cwd        sql.NullString
+			title, tSrc          sql.NullString
+			firstMsg             sql.NullString
+			startedAt, la        sql.NullInt64
+			openedAt             sql.NullInt64
+			archived, miss, live int
+			openCount            int
+			_id                  string
 		)
 		if err := rows.Scan(
 			&_id, &s.Tool, &s.SessionUUID, &filePath, &s.Size, &cwd,
 			&startedAt, &la, &title, &tSrc, &firstMsg,
-			&archived, &miss, &openedAt, &openCount,
+			&archived, &miss, &live, &openedAt, &openCount,
 		); err != nil {
 			return nil, err
 		}
@@ -306,6 +322,7 @@ func (d *DB) Query(f QueryFilter) ([]Session, error) {
 		s.FirstMsg = firstMsg.String
 		s.Archived = archived == 1
 		s.Missing = miss == 1
+		s.Live = live == 1
 		if startedAt.Valid {
 			s.StartedAt = time.Unix(startedAt.Int64, 0)
 		}

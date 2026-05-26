@@ -106,7 +106,7 @@ func (i sessionItem) Title() string {
 	return renderToolLabel(i.s.Tool) + " " + t
 }
 
-// Badge styles for archived/missing markers in the row description.
+// Badge styles for archived/missing/live markers in the row description.
 var (
 	archivedBadge = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}).
@@ -115,6 +115,10 @@ var (
 	missingBadge = lipgloss.NewStyle().
 			Foreground(lipgloss.AdaptiveColor{Light: "160", Dark: "203"}).
 			Render("[missing]")
+	liveBadge = lipgloss.NewStyle().
+			Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "46"}).
+			Bold(true).
+			Render("● live")
 )
 
 func (i sessionItem) Description() string {
@@ -126,14 +130,17 @@ func (i sessionItem) Description() string {
 	if cwd == "" {
 		cwd = "?"
 	}
-	var prefix string
-	switch {
-	case i.s.Missing:
-		prefix = missingBadge + " "
-	case i.s.Archived:
-		prefix = archivedBadge + " "
+	var parts []string
+	if i.s.Live {
+		parts = append(parts, liveBadge)
 	}
-	return prefix + when + "  " + cwd
+	if i.s.Missing {
+		parts = append(parts, missingBadge)
+	} else if i.s.Archived {
+		parts = append(parts, archivedBadge)
+	}
+	parts = append(parts, when, cwd)
+	return strings.Join(parts, "  ")
 }
 
 func (i sessionItem) FilterValue() string {

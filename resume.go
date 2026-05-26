@@ -28,6 +28,12 @@ func resumeSession(s Session) error {
 	if err != nil {
 		return err
 	}
+	if s.Live && s.Tool == "claude" {
+		// Claude refuses to --resume a session whose pid sidecar still
+		// references a live process; --fork-session works around that by
+		// creating a new session id while preserving the conversation.
+		args = append([]string{args[0], "--fork-session"}, args[1:]...)
+	}
 	path, err := exec.LookPath(bin)
 	if err != nil {
 		return fmt.Errorf("%s not on PATH: %w", bin, err)

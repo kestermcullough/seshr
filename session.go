@@ -15,6 +15,7 @@ type Session struct {
 	Size        int64     // file size in bytes
 	Archived    bool      // user marked it hidden from default view
 	Missing     bool      // source file/thread no longer present on disk
+	Live        bool      // a process holding this session is currently running
 }
 
 func (s Session) ID() string { return s.Tool + ":" + s.SessionUUID }
