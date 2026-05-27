@@ -25,6 +25,15 @@ const (
 	modeInfo
 )
 
+// Item Y-offsets used by click-to-select handlers. Numbers come from the
+// bubbles/list default rendering (title + 1 blank line, then height-2 items)
+// plus our wrapping border.
+const (
+	listItemHeight     = 2 // default delegate row height
+	pickerFirstItemY   = 3 // border-top(1) + title(1) + blank(1)
+	sessionsFirstItemY = 6 // input box(3) + border-top(1) + title(1) + blank(1)
+)
+
 // ── Picker prompts ──────────────────────────────────────────────────────────
 
 type pickerPromptKind int
@@ -218,6 +227,12 @@ type tuiModel struct {
 
 	// agentStorage is computed on demand when the info modal opens.
 	agentStorage []AgentStorageStat
+
+	// Click tracking for double-click detection (timestamps and Y position
+	// of the most recent left-click; <300ms + Y within 1 row counts as a
+	// double).
+	lastClickTime time.Time
+	lastClickY    int
 
 	// sessions
 	list         list.Model
@@ -451,6 +466,16 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updatePickerPrompt(msg)
 	}
 
+	// Mouse: click selects (skipping spacer rows); double-click acts as Enter.
+	if mm, ok := msg.(tea.MouseMsg); ok {
+		if mm.Action == tea.MouseActionPress && mm.Button == tea.MouseButtonLeft {
+			return m.handlePickerClick(mm)
+		}
+		var cmd tea.Cmd
+		m.pickerList, cmd = m.pickerList.Update(mm)
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if m.pickerList.FilterState() == list.Filtering {
@@ -518,6 +543,54 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.pickerList, cmd = m.pickerList.Update(msg)
 	return m, cmd
+}
+
+// handlePickerClick translates a mouse Y into a picker row. Single-click
+// selects (skipping spacers); double-click activates (same as pressing Enter).
+func (m tuiModel) handlePickerClick(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
+	items := m.pickerList.VisibleItems()
+	idx, ok := clickToVisibleIndex(mm.Y, pickerFirstItemY, items, m.pickerList.Paginator.Page, m.pickerList.Paginator.PerPage)
+	if !ok {
+		return m, nil
+	}
+	// Skip spacer rows when landing on them — find the nearest non-spacer
+	// below; if none, fall back upward.
+	idx = pickerSkipSpacer(items, idx)
+	if idx < 0 {
+		return m, nil
+	}
+
+	double := isDoubleClickNear(m, mm.Y)
+	m.lastClickTime = time.Now()
+	m.lastClickY = mm.Y
+
+	m.pickerList.Select(idx)
+	if double {
+		if it, ok := m.pickerList.SelectedItem().(pickerItem); ok {
+			if it.kind != pickerAdd {
+				m.status = "scanning…"
+			}
+			return m.handlePickerEnter(it)
+		}
+	}
+	return m, nil
+}
+
+// pickerSkipSpacer returns the nearest non-spacer index at or after idx,
+// falling back to one before idx if everything after is a spacer. Returns
+// -1 if there's no non-spacer in the list at all.
+func pickerSkipSpacer(items []list.Item, idx int) int {
+	for i := idx; i < len(items); i++ {
+		if it, ok := items[i].(pickerItem); ok && it.kind != pickerSpacer {
+			return i
+		}
+	}
+	for i := idx - 1; i >= 0; i-- {
+		if it, ok := items[i].(pickerItem); ok && it.kind != pickerSpacer {
+			return i
+		}
+	}
+	return -1
 }
 
 func (m tuiModel) updatePickerPrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -654,13 +727,16 @@ func (m tuiModel) updateAddProject(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── Sessions mode ───────────────────────────────────────────────────────────
 
 func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Mouse events: route by horizontal position. Wheel/click on the left
-	// half goes to the list (cursor/scroll), right half goes to the
-	// preview viewport.
+	// Mouse events: route by horizontal position. Left half → list (click
+	// or wheel); right half → preview viewport (wheel scroll).
 	if mm, ok := msg.(tea.MouseMsg); ok {
-		var cmd tea.Cmd
 		if mm.X < m.width/2 {
+			if mm.Action == tea.MouseActionPress && mm.Button == tea.MouseButtonLeft {
+				return m.handleSessionListClick(mm)
+			}
+			// Pass everything else (wheel) to the list.
 			prev := m.list.Index()
+			var cmd tea.Cmd
 			m.list, cmd = m.list.Update(mm)
 			if m.list.Index() != prev {
 				if it, ok := m.list.SelectedItem().(sessionItem); ok {
@@ -672,9 +748,10 @@ func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-		} else {
-			m.preview, cmd = m.preview.Update(mm)
+			return m, cmd
 		}
+		var cmd tea.Cmd
+		m.preview, cmd = m.preview.Update(mm)
 		return m, cmd
 	}
 
@@ -727,6 +804,69 @@ func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var vpCmd tea.Cmd
 	m.preview, vpCmd = m.preview.Update(msg)
 	return m, vpCmd
+}
+
+// handleSessionListClick translates an absolute mouse Y to a row in the
+// sessions list. Selects that row; if it's a double-click on the same row,
+// also kicks off resume.
+func (m tuiModel) handleSessionListClick(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
+	idx, ok := clickToVisibleIndex(mm.Y, sessionsFirstItemY, m.list.VisibleItems(), m.list.Paginator.Page, m.list.Paginator.PerPage)
+	if !ok {
+		return m, nil
+	}
+
+	double := isDoubleClickNear(m, mm.Y)
+	m.lastClickTime = time.Now()
+	m.lastClickY = mm.Y
+
+	m.list.Select(idx)
+	if it, ok := m.list.SelectedItem().(sessionItem); ok {
+		s := it.s
+		m.preview.SetContent(renderPreview(s, m.currentTokens()))
+		m.preview.GotoTop()
+		if double {
+			m.resume = &s
+			return m, tea.Quit
+		}
+		if needsAmpFetch(s) {
+			return m, ampFetchCmd(s)
+		}
+	}
+	return m, nil
+}
+
+// clickToVisibleIndex translates a terminal Y coordinate into an index
+// within the list's currently-visible items. Returns ok=false when the
+// click is above the first item or past the last item.
+func clickToVisibleIndex(absY, firstItemY int, items []list.Item, page, perPage int) (int, bool) {
+	if absY < firstItemY || len(items) == 0 {
+		return 0, false
+	}
+	if perPage <= 0 {
+		perPage = 1
+	}
+	visOnPage := (absY - firstItemY) / listItemHeight
+	idx := page*perPage + visOnPage
+	if idx < 0 || idx >= len(items) {
+		return 0, false
+	}
+	return idx, true
+}
+
+// isDoubleClickNear returns true when this click landed on (essentially) the
+// same row as the previous one and arrived within 300ms.
+func isDoubleClickNear(m tuiModel, y int) bool {
+	if m.lastClickTime.IsZero() {
+		return false
+	}
+	if time.Since(m.lastClickTime) > 300*time.Millisecond {
+		return false
+	}
+	dy := y - m.lastClickY
+	if dy < 0 {
+		dy = -dy
+	}
+	return dy <= 1
 }
 
 // navList passes a navigation key (up/down/pgup/pgdown/home/end) to the list
