@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ const (
 	modeAddProject
 	modeSessions
 	modeInfo
+	modeSettings
 )
 
 // Item Y-offsets used by click-to-select handlers. Numbers come from the
@@ -234,6 +236,10 @@ type tuiModel struct {
 	lastClickTime time.Time
 	lastClickY    int
 
+	// settingsInput is the textinput shown on the in-TUI settings modal
+	// for editing Claude's cleanupPeriodDays.
+	settingsInput textinput.Model
+
 	// sessions
 	list         list.Model
 	preview      viewport.Model
@@ -283,6 +289,11 @@ func newTUI(db *DB) tuiModel {
 	promptInput := textinput.New()
 	promptInput.CharLimit = 128
 
+	settingsInput := textinput.New()
+	settingsInput.CharLimit = 8
+	settingsInput.Width = 8
+	settingsInput.Placeholder = "days"
+
 	m := tuiModel{
 		db:          db,
 		mode:        modePicker,
@@ -291,7 +302,8 @@ func newTUI(db *DB) tuiModel {
 		preview:     vp,
 		searchInput: si,
 		addProject:  newAddProject(db),
-		prompt:      pickerPromptState{input: promptInput},
+		prompt:        pickerPromptState{input: promptInput},
+		settingsInput: settingsInput,
 	}
 	m.cleanupWarning = computeCleanupWarning()
 	m.cacheStats = seshrCacheStats()
@@ -440,6 +452,51 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateSessions(msg)
 	case modeInfo:
 		return m.updateInfo(msg)
+	case modeSettings:
+		return m.updateSettings(msg)
+	}
+	return m, nil
+}
+
+func (m tuiModel) enterSettings() (tea.Model, tea.Cmd) {
+	days, _, _ := ClaudeCleanupPeriodDays()
+	m.settingsInput.SetValue(strconv.Itoa(days))
+	m.settingsInput.CursorEnd()
+	m.settingsInput.Focus()
+	m.mode = modeSettings
+	return m, textinput.Blink
+}
+
+func (m tuiModel) updateSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if km, ok := msg.(tea.KeyMsg); ok {
+		switch km.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc", "q":
+			m.mode = modePicker
+			m.settingsInput.Blur()
+			return m, nil
+		case "enter":
+			val := strings.TrimSpace(m.settingsInput.Value())
+			n, err := strconv.Atoi(val)
+			if err != nil {
+				m.status = "expected integer days"
+				return m, nil
+			}
+			if err := SetClaudeCleanupPeriodDays(n); err != nil {
+				m.status = "set failed: " + err.Error()
+				return m, nil
+			}
+			m.status = fmt.Sprintf("claude cleanupPeriodDays = %d", n)
+			// Refresh the bottom-right warning since the underlying value changed.
+			m.cleanupWarning = computeCleanupWarning()
+			m.mode = modePicker
+			m.settingsInput.Blur()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.settingsInput, cmd = m.settingsInput.Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
@@ -538,6 +595,8 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cacheStats = seshrCacheStats()
 			m.mode = modeInfo
 			return m, nil
+		case "S":
+			return m.enterSettings()
 		}
 	}
 	var cmd tea.Cmd
@@ -1174,8 +1233,40 @@ func (m tuiModel) View() string {
 		return m.viewSessions()
 	case modeInfo:
 		return m.viewInfo()
+	case modeSettings:
+		return m.viewSettings()
 	}
 	return ""
+}
+
+func (m tuiModel) viewSettings() string {
+	title := lipgloss.NewStyle().Bold(true).Render("Settings")
+	faint := lipgloss.NewStyle().Faint(true)
+	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "166", Dark: "214"})
+	subHead := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "30", Dark: "36"})
+
+	var sb strings.Builder
+	sb.WriteString(title + "\n\n")
+	sb.WriteString(subHead.Render("Session retention by tool") + "\n\n")
+	for _, s := range SettingsReport() {
+		sb.WriteString(fmt.Sprintf("  %-6s %s\n", s.Tool, s.Description))
+		if s.Warning != "" {
+			sb.WriteString("         " + warnStyle.Render("⚠ "+s.Warning) + "\n")
+		}
+	}
+	sb.WriteString("\n")
+	sb.WriteString(subHead.Render("Change Claude cleanupPeriodDays") + "\n")
+	sb.WriteString("  " + m.settingsInput.View() + "  " +
+		faint.Render("days  (1 year = 365, never = 99999)") + "\n\n")
+	sb.WriteString(faint.Render("enter save · esc cancel"))
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(1, 2).
+		Width(76).
+		BorderForeground(lipgloss.AdaptiveColor{Light: "240", Dark: "245"}).
+		Render(sb.String())
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m tuiModel) viewPicker() string {
@@ -1198,7 +1289,7 @@ func (m tuiModel) viewPicker() string {
 		return lipgloss.JoinVertical(lipgloss.Left, body, promptLine)
 	}
 
-	keys := "↑/↓ select · enter open · + add · r rename · d remove · J/K reorder · i info · / filter · q quit"
+	keys := "↑/↓ open · + add · r rename · d remove · J/K reorder · i info · S settings · / filter · q quit"
 	bottom := statusLine(m.status, keys)
 	right := m.bottomRightChips()
 	if right != "" && m.width > 0 {

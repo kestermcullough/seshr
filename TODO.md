@@ -11,12 +11,12 @@ The preview now surfaces the most recent transcript turn containing every search
 - **Match navigation**: keys like `n` / `N` to step through earlier matches instead of jumping straight to the most recent. Sessions with many hits would benefit.
 - **More context**: show a turn or two before/after the match for orientation, not just the match in isolation.
 
-## 2. Mouse — click-to-select and click-to-resume
+## 2. Mouse — click-to-select follow-ups (basic version shipped)
 
-Mouse-wheel scrolling is now routed (left pane scrolls list, right scrolls preview). Still missing:
-- **Click a row** to select it (bubbles/list doesn't do this by default — needs custom delegate or a translate-click-to-cursor helper)
-- **Double-click** a row to resume (would need debounce tracking; ~300ms window)
-- Click on the search input to focus / clear (already focused, but explicit click is more discoverable)
+Click-to-select + double-click-to-resume now work in both the picker and sessions list. Remaining nits:
+- Y-coordinate math assumes the bubbles/list default-delegate row height (2). If we ever swap delegates, the firstItemY constants need re-tuning.
+- Click on the sessions-view search input doesn't focus/clear it explicitly (it's already focused; would just be more discoverable).
+- Click on the preview pane should move keyboard focus there for scroll/PgDn, distinct from the list. Not actionable until we add a focused-pane concept.
 
 ## 3. Picker spacer is selectable
 
@@ -32,31 +32,31 @@ Claude version landed (reads `~/.claude/sessions/*.json` pid sidecars). Three si
 
 When live for any tool: same UI badge, same fork-on-resume behavior where the tool supports it (Codex/Pi don't have a `--fork-session` equivalent — we'd just warn and resume anyway).
 
-## 5. Settings — in-TUI screen
+## 5. Settings — follow-ups (in-TUI screen shipped)
 
-`seshr settings` CLI subcommand shipped (lists retention per tool; sets Claude's `cleanupPeriodDays`). Follow-ups:
-- A TUI screen (key `S` from the picker) that shows the same report and lets the user edit Claude's value inline — no terminal-context-switch
-- Detect Claude's setting on launch and offer a one-keystroke "raise it now" prompt instead of just a stderr warning
-- (Stretch) write the same setting to all detected Claude config locations (project `.claude/settings.json`, etc.) — currently only touches `~/.claude/settings.json`
+`S` from the picker opens a modal that shows per-tool retention and lets the user edit Claude's `cleanupPeriodDays` inline. CLI subcommand still works. Remaining ideas:
+- One-keystroke "raise it now" prompt from the cleanup warning chip itself (currently `S` is needed)
+- Quick presets in the settings modal (1=90, 2=180, 3=365, 4=99999) so users don't have to type
+- (Stretch) write the same value to detected project-level `.claude/settings.json` files
 
 ## 6. Project picker — remaining polish
 
 Rename / remove / reorder landed. Still:
 - "Save as project?" prompt when entering Current dir without a matching saved project
 
-## 3. Sessions screen — remaining color polish
+## 7. Sessions screen — remaining color polish
 
 Tool chips, archived/missing/live badges, and status colors landed. Still:
 - Scope chip in the list title styled distinctly
 - Selection highlight that respects the tool color of the selected row
 
-## 4. Quit shortcut in sessions view
+## 8. Quit shortcut in sessions view
 
 `q` types into the search bar now (intentional — as-you-type search). Currently `Esc` returns to picker; from picker, `q` quits. Consider:
 - `Esc Esc` to quit directly from sessions view
 - Or just live with the two-step flow
 
-## 5. End-to-end resume test
+## 9. End-to-end resume test
 
 `syscall.Exec` paths are wired for all four tools. Claude verified (this conversation's resume + fork-session path). Still need a hands-on:
 - Codex (`codex resume <uuid>`)
@@ -64,7 +64,7 @@ Tool chips, archived/missing/live badges, and status colors landed. Still:
 - Pi (`pi --session <uuid>`)
 - Edge case: alt-screen cleanup on resume failure (rename `claude` binary out of PATH temporarily and verify the terminal isn't left in a weird state)
 
-## 6. Live refresh follow-ups
+## 10. Live refresh follow-ups
 
 5s tea.Tick polling for file-based tools shipped. Still open:
 - **mtime-skip** in the per-tick parse so we only re-read files that changed since last sync
