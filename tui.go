@@ -523,13 +523,10 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updatePickerPrompt(msg)
 	}
 
-	// Mouse: click selects (skipping spacer rows); double-click acts as Enter.
-	if mm, ok := msg.(tea.MouseMsg); ok {
-		if mm.Action == tea.MouseActionPress && mm.Button == tea.MouseButtonLeft {
-			return m.handlePickerClick(mm)
-		}
+	// Mouse: wheel only — click-to-select is shelved (see TODO).
+	if _, ok := msg.(tea.MouseMsg); ok {
 		var cmd tea.Cmd
-		m.pickerList, cmd = m.pickerList.Update(mm)
+		m.pickerList, cmd = m.pickerList.Update(msg)
 		return m, cmd
 	}
 
@@ -786,16 +783,12 @@ func (m tuiModel) updateAddProject(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── Sessions mode ───────────────────────────────────────────────────────────
 
 func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Mouse events: route by horizontal position. Left half → list (click
-	// or wheel); right half → preview viewport (wheel scroll).
+	// Mouse events: route by horizontal position. Wheel only — click-to-
+	// select is shelved until we find a reliable layout-offset mechanism.
 	if mm, ok := msg.(tea.MouseMsg); ok {
+		var cmd tea.Cmd
 		if mm.X < m.width/2 {
-			if mm.Action == tea.MouseActionPress && mm.Button == tea.MouseButtonLeft {
-				return m.handleSessionListClick(mm)
-			}
-			// Pass everything else (wheel) to the list.
 			prev := m.list.Index()
-			var cmd tea.Cmd
 			m.list, cmd = m.list.Update(mm)
 			if m.list.Index() != prev {
 				if it, ok := m.list.SelectedItem().(sessionItem); ok {
@@ -807,10 +800,9 @@ func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			return m, cmd
+		} else {
+			m.preview, cmd = m.preview.Update(mm)
 		}
-		var cmd tea.Cmd
-		m.preview, cmd = m.preview.Update(mm)
 		return m, cmd
 	}
 
