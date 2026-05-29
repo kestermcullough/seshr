@@ -11,16 +11,14 @@ The preview now surfaces the most recent transcript turn containing every search
 - **Match navigation**: keys like `n` / `N` to step through earlier matches instead of jumping straight to the most recent. Sessions with many hits would benefit.
 - **More context**: show a turn or two before/after the match for orientation, not just the match in isolation.
 
-## 2. Mouse — click-to-select (shelved; wheel scroll works)
+## 2. Mouse — click-to-select follow-ups (fixed!)
 
-Tried a first pass with hard-coded Y offsets (`sessionsFirstItemY=6`, `pickerFirstItemY=3`) derived from bubbles/list's default rendering math. In practice clicks landed wrong — terminal layout differs from the assumed model somehow.
+Root cause of the wonky first attempt: `bubbles/list.DefaultDelegate.Spacing()` is `1`, so each item slot is `Height()+Spacing()` = **3 lines**, not 2. My constants assumed 2 → clicks drifted further off the more you scrolled. Fixed by setting `listItemHeight = 3`.
 
-What needs to change before another attempt:
-- **Calibrate at runtime**, not via constants. One option: render the View() text, scan line-by-line for known item Title prefixes (e.g. the `[CLAUDE]` chip), build an absolute-Y → item-index map per render. Cost: O(lines) per click, cheap.
-- Another option: instrument with a temporary debug overlay (status line shows click Y + current cursor Y) and use real measurements to figure out what the offset actually is.
-- Code for the previous attempt is still in `tui.go` (`handleSessionListClick`, `handlePickerClick`, `clickToVisibleIndex`, `isDoubleClickNear`, `pickerSkipSpacer`, plus `lastClickTime`/`lastClickY` fields) but not wired in — easy to re-enable once a robust coord-to-index function exists.
-
-Once click-to-select works, double-click-to-resume is ~10 lines (the previous attempt's debounce logic).
+Remaining nits:
+- If we ever swap delegates (e.g., a compact mode), `listItemHeight` needs to track that. Could derive it dynamically from the delegate at TUI construction.
+- Click on the sessions-view search input doesn't focus/clear it explicitly (it's already focused; just a discoverability tweak).
+- Click on the preview pane should arguably move keyboard focus there for scroll/PgDn, distinct from the list. Not actionable until we add a focused-pane concept.
 
 ## 3. Picker spacer is selectable
 

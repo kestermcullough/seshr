@@ -1,4 +1,4 @@
-module seshr
+module github.com/kestermcullough/seshr
 
 go 1.26.3
 

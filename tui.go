@@ -28,12 +28,13 @@ const (
 )
 
 // Item Y-offsets used by click-to-select handlers. Numbers come from the
-// bubbles/list default rendering (title + 1 blank line, then height-2 items)
-// plus our wrapping border.
+// bubbles/list default rendering: title block(2) + items where each item slot
+// is Height()+Spacing() = 2 + 1 = 3 lines (title row, desc row, blank spacer
+// below). The blank spacer is counted as part of the previous item's slot.
 const (
-	listItemHeight     = 2 // default delegate row height
-	pickerFirstItemY   = 3 // border-top(1) + title(1) + blank(1)
-	sessionsFirstItemY = 6 // input box(3) + border-top(1) + title(1) + blank(1)
+	listItemHeight     = 3 // DefaultDelegate.Height()+Spacing() = 2+1
+	pickerFirstItemY   = 3 // border-top(1) + title(1) + title-bottom-pad(1)
+	sessionsFirstItemY = 6 // input box(3) + border-top(1) + title(1) + pad(1)
 )
 
 // ── Picker prompts ──────────────────────────────────────────────────────────
@@ -523,8 +524,12 @@ func (m tuiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updatePickerPrompt(msg)
 	}
 
-	// Mouse: wheel only — click-to-select is shelved (see TODO).
-	if _, ok := msg.(tea.MouseMsg); ok {
+	// Mouse: left-click selects (skipping spacers); double-click activates.
+	// Wheel scrolls the list.
+	if mm, ok := msg.(tea.MouseMsg); ok {
+		if mm.Action == tea.MouseActionPress && mm.Button == tea.MouseButtonLeft {
+			return m.handlePickerClick(mm)
+		}
 		var cmd tea.Cmd
 		m.pickerList, cmd = m.pickerList.Update(msg)
 		return m, cmd
@@ -783,12 +788,15 @@ func (m tuiModel) updateAddProject(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ── Sessions mode ───────────────────────────────────────────────────────────
 
 func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Mouse events: route by horizontal position. Wheel only — click-to-
-	// select is shelved until we find a reliable layout-offset mechanism.
+	// Mouse: left-click selects (double-click resumes); wheel scrolls the
+	// hovered pane. Left half = list; right half = preview viewport.
 	if mm, ok := msg.(tea.MouseMsg); ok {
-		var cmd tea.Cmd
 		if mm.X < m.width/2 {
+			if mm.Action == tea.MouseActionPress && mm.Button == tea.MouseButtonLeft {
+				return m.handleSessionListClick(mm)
+			}
 			prev := m.list.Index()
+			var cmd tea.Cmd
 			m.list, cmd = m.list.Update(mm)
 			if m.list.Index() != prev {
 				if it, ok := m.list.SelectedItem().(sessionItem); ok {
@@ -800,9 +808,10 @@ func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-		} else {
-			m.preview, cmd = m.preview.Update(mm)
+			return m, cmd
 		}
+		var cmd tea.Cmd
+		m.preview, cmd = m.preview.Update(mm)
 		return m, cmd
 	}
 
