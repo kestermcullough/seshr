@@ -47,8 +47,7 @@ func discoverAmp() ([]Session, []error) {
 		return nil, nil
 	}
 
-	cmd := exec.Command(bin, "threads", "list", "--include-archived", "--json")
-	out, err := cmd.Output()
+	out, err := runCommandOutput(bin, "threads", "list", "--include-archived", "--json")
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
@@ -92,6 +91,15 @@ func decodeFileURI(uri string) string {
 	if uri == "" {
 		return ""
 	}
+	u, err := url.Parse(uri)
+	if err == nil && u.Scheme == "file" {
+		if u.Host != "" && u.Host != "localhost" {
+			return "//" + u.Host + u.Path
+		}
+		if u.Path != "" {
+			return u.Path
+		}
+	}
 	p := strings.TrimPrefix(uri, "file://")
 	if dec, err := url.PathUnescape(p); err == nil {
 		return dec
@@ -99,8 +107,12 @@ func decodeFileURI(uri string) string {
 	return p
 }
 
+func ampDiscoverable() bool {
+	return findAmpBinary() != ""
+}
+
 func findAmpBinary() string {
-	if p, err := exec.LookPath("amp"); err == nil {
+	if p, err := lookPath("amp"); err == nil {
 		return p
 	}
 	candidate := filepath.Join(homeDir(), ".amp", "bin", "amp")

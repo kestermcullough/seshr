@@ -7,7 +7,7 @@ A CLI that finds, searches, previews, and resumes AI coding agent sessions acros
 Two-pane TUI, keyboard + mouse both first-class:
 - **Left**: filtered session list — `tool · when · title · cwd`
 - **Right**: preview of the last turn or two (depends on size)
-- As-you-type fuzzy search across title and cwd (content search is a v2 stretch)
+- As-you-type token search across title, cwd, tool, and first message
 - `Enter` (or double-click) → resume in the original tool, exec-replacing into its native CLI
 - `a` → archive / unarchive selected session
 - `R` → force re-scan of source dirs
@@ -61,18 +61,17 @@ Strategy: `exec` the native CLI so the user lands cleanly in the resumed session
 
 ## Tech stack
 
-**Go + Bubble Tea.** Single static binary, fast startup, mouse-friendly, ecosystem is purpose-built for this kind of TUI.
+**Go + Bubble Tea.** Single static binary, fast startup, mouse-friendly, ecosystem is purpose-built for this kind of TUI. The current dependency set requires Go 1.25+.
 
 Key deps:
 - `charmbracelet/bubbletea` — the runtime
 - `charmbracelet/bubbles` — list, viewport, textinput (mouse support built in)
 - `charmbracelet/lipgloss` — styling
 - `modernc.org/sqlite` — pure-Go SQLite driver (no CGO; keeps cross-compile / `go install` painless)
-- `sahilm/fuzzy` — fuzzy ranking for the search input
 
 ## Local cache database
 
-The agent tools' files are source of truth — we never write to them. Our own SQLite DB at `~/.local/share/agent-sessions/sessions.db` stores indexed metadata plus our own user state (archive flag, last-opened, etc.).
+The agent tools' files are source of truth — we never write to them. Our own SQLite DB at `~/.local/share/seshr/sessions.db` stores indexed metadata plus our own user state (archive flag, last-opened, etc.).
 
 Update flow on launch:
 1. Walk each tool's source dir, collect file paths + mtimes

@@ -5,7 +5,7 @@ set -e
 
 if ! command -v go >/dev/null 2>&1; then
   echo "error: 'go' is not on PATH."
-  echo "Install Go 1.21+ from https://go.dev/dl/ and re-run this script."
+  echo "Install Go 1.25+ from https://go.dev/dl/ and re-run this script."
   exit 1
 fi
 

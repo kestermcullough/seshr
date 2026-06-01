@@ -7,57 +7,84 @@ import (
 
 type discoverFunc func() ([]Session, []error)
 
+type discoverSpec struct {
+	tool      string
+	fn        discoverFunc
+	available func() bool
+}
+
+type DiscoveryResult struct {
+	Sessions      []Session
+	Errors        []error
+	CompleteTools []string
+}
+
 // DiscoverAll runs every per-tool discovery in parallel and merges the results.
 // Returned sessions are sorted by LastActive descending (newest first).
 // Errors are accumulated and returned alongside the partial results.
 func DiscoverAll() ([]Session, []error) {
-	return discoverWith([]discoverFunc{
-		discoverClaude,
-		discoverCodex,
-		discoverAmp,
-		discoverPi,
+	r := DiscoverAllDetailed()
+	return r.Sessions, r.Errors
+}
+
+func DiscoverAllDetailed() DiscoveryResult {
+	return discoverWith([]discoverSpec{
+		{tool: "claude", fn: discoverClaude},
+		{tool: "codex", fn: discoverCodex},
+		{tool: "amp", fn: discoverAmp, available: ampDiscoverable},
+		{tool: "pi", fn: discoverPi},
 	})
 }
 
 // DiscoverFileBased runs only the tools whose sessions live on the local
 // filesystem (Claude, Codex, Pi) — i.e. cheap enough to call from a periodic
 // background tick. Amp is excluded because it requires a network call.
-//
-// FileBasedTools should match the set of tools dispatched here; it's used by
-// callers that need to scope DB sync to "just what this function covered."
 func DiscoverFileBased() ([]Session, []error) {
-	return discoverWith([]discoverFunc{
-		discoverClaude,
-		discoverCodex,
-		discoverPi,
+	r := DiscoverFileBasedDetailed()
+	return r.Sessions, r.Errors
+}
+
+func DiscoverFileBasedDetailed() DiscoveryResult {
+	return discoverWith([]discoverSpec{
+		{tool: "claude", fn: discoverClaude},
+		{tool: "codex", fn: discoverCodex},
+		{tool: "pi", fn: discoverPi},
 	})
 }
 
-// FileBasedTools is the tool-name set covered by DiscoverFileBased. Pass to
-// SyncSessionsScoped so background ticks don't mark Amp rows missing.
-var FileBasedTools = []string{"claude", "codex", "pi"}
-
-func discoverWith(funcs []discoverFunc) ([]Session, []error) {
+func discoverWith(specs []discoverSpec) DiscoveryResult {
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
 		sessions []Session
 		errs     []error
+		complete = make([]string, 0, len(specs))
 	)
-	for _, fn := range funcs {
+	for _, spec := range specs {
 		wg.Add(1)
-		go func(f discoverFunc) {
+		go func(s discoverSpec) {
 			defer wg.Done()
-			ss, es := f()
+			if s.available != nil && !s.available() {
+				return
+			}
+			ss, es := s.fn()
 			mu.Lock()
 			sessions = append(sessions, ss...)
 			errs = append(errs, es...)
+			if len(es) == 0 {
+				complete = append(complete, s.tool)
+			}
 			mu.Unlock()
-		}(fn)
+		}(spec)
 	}
 	wg.Wait()
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].LastActive.After(sessions[j].LastActive)
 	})
-	return sessions, errs
+	sort.Strings(complete)
+	return DiscoveryResult{
+		Sessions:      sessions,
+		Errors:        errs,
+		CompleteTools: complete,
+	}
 }

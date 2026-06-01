@@ -16,7 +16,7 @@ type DB struct {
 }
 
 func dbDir() string {
-	return filepath.Join(homeDir(), ".local", "share", "seshr")
+	return dataDir()
 }
 
 // migrateDataDirName moves the data dir from the tool's previous name
@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS projects (
     id           INTEGER PRIMARY KEY,
     name         TEXT    NOT NULL,
     path         TEXT    NOT NULL UNIQUE,
+    real_path    TEXT,
     sort_order   INTEGER,
     last_used_at INTEGER,
     added_at     INTEGER NOT NULL
@@ -178,8 +179,8 @@ func (d *DB) SyncSessions(discovered []Session) error {
 
 // SyncSessionsScoped is like SyncSessions but only marks rows missing whose
 // tool is in `scope`. Pass nil to mark missing across all tools (full sync);
-// pass e.g. ["claude","codex","pi"] for a partial sync that should not touch
-// Amp rows.
+// pass an empty non-nil slice to upsert without marking anything missing; pass
+// e.g. ["claude","codex","pi"] for a partial sync that should not touch Amp.
 func (d *DB) SyncSessionsScoped(discovered []Session, scope []string) error {
 	now := time.Now().Unix()
 	tx, err := d.sqldb.Begin()
@@ -188,11 +189,11 @@ func (d *DB) SyncSessionsScoped(discovered []Session, scope []string) error {
 	}
 	defer tx.Rollback()
 
-	if len(scope) == 0 {
+	if scope == nil {
 		if _, err := tx.Exec(`UPDATE sessions SET missing=1`); err != nil {
 			return err
 		}
-	} else {
+	} else if len(scope) > 0 {
 		placeholders := strings.Repeat("?,", len(scope))
 		placeholders = strings.TrimSuffix(placeholders, ",")
 		args := make([]any, len(scope))
@@ -264,9 +265,10 @@ func (d *DB) SyncSessionsScoped(discovered []Session, scope []string) error {
 
 // QueryFilter chooses which sessions to return for display.
 type QueryFilter struct {
-	CWDPrefix    string // empty = no cwd restriction
-	ShowArchived bool   // false = exclude archived
-	ShowMissing  bool   // false = exclude missing (file vanished / API thread deleted)
+	CWDPrefix    string   // empty = no cwd restriction
+	CWDPrefixes  []string // optional additional cwd roots to match
+	ShowArchived bool     // false = exclude archived
+	ShowMissing  bool     // false = exclude missing (file vanished / API thread deleted)
 }
 
 // Query returns visible sessions ordered by last_active descending.
@@ -283,9 +285,13 @@ func (d *DB) Query(f QueryFilter) ([]Session, error) {
 	if !f.ShowMissing {
 		q += ` AND missing = 0`
 	}
-	if f.CWDPrefix != "" {
-		q += ` AND (cwd = ? OR cwd LIKE ?)`
-		args = append(args, f.CWDPrefix, f.CWDPrefix+"/%")
+	if scopes := f.cwdScopes(); len(scopes) > 0 {
+		var parts []string
+		for _, scope := range scopes {
+			parts = append(parts, `(cwd = ? OR cwd LIKE ? ESCAPE '\')`)
+			args = append(args, scope, cwdLikePattern(scope))
+		}
+		q += ` AND (` + strings.Join(parts, ` OR `) + `)`
 	}
 	q += ` ORDER BY last_active DESC NULLS LAST`
 
@@ -332,6 +338,39 @@ func (d *DB) Query(f QueryFilter) ([]Session, error) {
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+func (f QueryFilter) cwdScopes() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	add(f.CWDPrefix)
+	for _, s := range f.CWDPrefixes {
+		add(s)
+	}
+	return out
+}
+
+func cwdLikePattern(prefix string) string {
+	prefix = escapeSQLiteLike(prefix)
+	if prefix == string(filepath.Separator) {
+		return prefix + "%"
+	}
+	return prefix + string(filepath.Separator) + "%"
+}
+
+func escapeSQLiteLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 func (d *DB) Archive(id string) error {

@@ -2,7 +2,7 @@
 
 A small terminal app that finds, searches, previews, and resumes your AI coding-agent sessions across **Claude Code**, **OpenAI Codex**, **Sourcegraph Amp**, and **Pi** — all in one searchable list.
 
-It walks wherever each agent stores its session files, unifies them, lets you fuzzy-search by title / cwd / message content, previews the most-recent matching turn, and `exec`s straight back into the original tool's CLI to resume.
+It walks wherever each agent stores its session files, unifies them, lets you search by title / cwd / message content, previews the most-recent matching turn, and `exec`s straight back into the original tool's CLI to resume.
 
 ## Install
 
@@ -10,7 +10,7 @@ It walks wherever each agent stores its session files, unifies them, lets you fu
 curl -fsSL https://raw.githubusercontent.com/kestermcullough/seshr/main/install.sh | sh
 ```
 
-Requires Go 1.21+ (the script compiles from source via `go install`).
+Requires Go 1.25+ (the script compiles from source via `go install`).
 
 Or, manually:
 

@@ -242,11 +242,12 @@ type tuiModel struct {
 	settingsInput textinput.Model
 
 	// sessions
-	list         list.Model
-	preview      viewport.Model
-	searchInput  textinput.Model
-	filter       QueryFilter
-	allSessions  []Session // unfiltered set most-recently loaded from DB
+	list        list.Model
+	preview     viewport.Model
+	searchInput textinput.Model
+	filter      QueryFilter
+	allSessions []Session // unfiltered set most-recently loaded from DB
+	matchCache  transcriptMatchCache
 
 	// shared
 	width, height int
@@ -296,13 +297,14 @@ func newTUI(db *DB) tuiModel {
 	settingsInput.Placeholder = "days"
 
 	m := tuiModel{
-		db:          db,
-		mode:        modePicker,
-		pickerList:  pl,
-		list:        sl,
-		preview:     vp,
-		searchInput: si,
-		addProject:  newAddProject(db),
+		db:            db,
+		mode:          modePicker,
+		pickerList:    pl,
+		list:          sl,
+		preview:       vp,
+		searchInput:   si,
+		matchCache:    transcriptMatchCache{},
+		addProject:    newAddProject(db),
 		prompt:        pickerPromptState{input: promptInput},
 		settingsInput: settingsInput,
 	}
@@ -340,11 +342,14 @@ type projectsLoadedMsg struct{ projects []Project }
 type sessionsLoadedMsg struct {
 	sessions []Session
 	filter   QueryFilter
+	note     string
+	err      error
 }
 type archiveDoneMsg struct{ note string }
 type refreshDoneMsg struct {
 	sessions []Session
 	note     string
+	err      error
 }
 type softRefreshDoneMsg struct{ sessions []Session }
 type ampPreviewFetchedMsg struct {
@@ -374,13 +379,18 @@ func (m tuiModel) loadSessionsCmd(filter QueryFilter, projectID int64) tea.Cmd {
 	return func() tea.Msg {
 		// Always discover + sync before querying so newly-active and
 		// just-finalized sessions surface without the user having to refresh.
-		discovered, _ := DiscoverAll()
-		_ = db.SyncSessions(discovered)
-		sessions, _ := db.Query(filter)
+		discovered := DiscoverAllDetailed()
+		if err := db.SyncSessionsScoped(discovered.Sessions, discovered.CompleteTools); err != nil {
+			return sessionsLoadedMsg{filter: filter, err: err}
+		}
+		sessions, err := db.Query(filter)
+		if err != nil {
+			return sessionsLoadedMsg{filter: filter, err: err}
+		}
 		if projectID > 0 {
 			_ = db.TouchProject(projectID)
 		}
-		return sessionsLoadedMsg{sessions: sessions, filter: filter}
+		return sessionsLoadedMsg{sessions: sessions, filter: filter, note: discoveryNote(discovered.Errors)}
 	}
 }
 
@@ -400,9 +410,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sessionsLoadedMsg:
+		if msg.err != nil {
+			m.status = "load failed: " + msg.err.Error()
+			return m, nil
+		}
 		cmd := m.applySessions(msg.sessions, msg.filter)
 		m.mode = modeSessions
-		m.status = ""
+		m.status = msg.note
 		m.searchInput.Focus()
 		return m, tea.Batch(cmd, textinput.Blink)
 
@@ -411,6 +425,10 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refreshSessions()
 
 	case refreshDoneMsg:
+		if msg.err != nil {
+			m.status = "refresh failed: " + msg.err.Error()
+			return m, nil
+		}
 		cmd := m.applySessions(msg.sessions, m.filter)
 		if msg.note != "" {
 			m.status = msg.note
@@ -430,7 +448,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.preview.SetContent(previewHeader(it.s) + "(amp fetch failed: " + msg.err.Error() + ")\n")
 			} else {
-				m.preview.SetContent(renderPreview(it.s, m.currentTokens()))
+				clearTranscriptMatchCacheForSession(m.matchCache, msg.sessionID)
+				m.preview.SetContent(renderPreviewCached(it.s, m.currentTokens(), m.matchCache))
 			}
 			m.preview.GotoTop()
 		}
@@ -719,7 +738,7 @@ func (m tuiModel) handlePickerEnter(it pickerItem) (tea.Model, tea.Cmd) {
 		}
 		return m, m.loadSessionsCmd(QueryFilter{CWDPrefix: it.cwd}, 0)
 	case pickerSaved:
-		return m, m.loadSessionsCmd(QueryFilter{CWDPrefix: it.project.MatchPath()}, it.project.ID)
+		return m, m.loadSessionsCmd(QueryFilter{CWDPrefixes: it.project.MatchPaths()}, it.project.ID)
 	case pickerAdd:
 		cwd, _ := os.Getwd()
 		return m.enterAddMode(cwd)
@@ -801,7 +820,7 @@ func (m tuiModel) updateSessions(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.list.Index() != prev {
 				if it, ok := m.list.SelectedItem().(sessionItem); ok {
 					s := it.s
-					m.preview.SetContent(renderPreview(s, m.currentTokens()))
+					m.preview.SetContent(renderPreviewCached(s, m.currentTokens(), m.matchCache))
 					m.preview.GotoTop()
 					if needsAmpFetch(s) {
 						cmd = tea.Batch(cmd, ampFetchCmd(s))
@@ -882,7 +901,7 @@ func (m tuiModel) handleSessionListClick(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
 	m.list.Select(idx)
 	if it, ok := m.list.SelectedItem().(sessionItem); ok {
 		s := it.s
-		m.preview.SetContent(renderPreview(s, m.currentTokens()))
+		m.preview.SetContent(renderPreviewCached(s, m.currentTokens(), m.matchCache))
 		m.preview.GotoTop()
 		if double {
 			m.resume = &s
@@ -939,7 +958,7 @@ func (m tuiModel) navList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.list.Index() != prev {
 		if it, ok := m.list.SelectedItem().(sessionItem); ok {
 			s := it.s
-			m.preview.SetContent(renderPreview(s, m.currentTokens()))
+			m.preview.SetContent(renderPreviewCached(s, m.currentTokens(), m.matchCache))
 			m.preview.GotoTop()
 			if needsAmpFetch(s) {
 				cmd = tea.Batch(cmd, ampFetchCmd(s))
@@ -975,10 +994,18 @@ func (m tuiModel) refresh() tea.Cmd {
 	db := m.db
 	filter := m.filter
 	return func() tea.Msg {
-		discovered, _ := DiscoverAll()
-		_ = db.SyncSessions(discovered)
-		sessions, _ := db.Query(filter)
-		return refreshDoneMsg{sessions: sessions, note: fmt.Sprintf("re-scanned · %d sessions", len(sessions))}
+		discovered := DiscoverAllDetailed()
+		if err := db.SyncSessionsScoped(discovered.Sessions, discovered.CompleteTools); err != nil {
+			return refreshDoneMsg{err: err}
+		}
+		sessions, err := db.Query(filter)
+		if err != nil {
+			return refreshDoneMsg{err: err}
+		}
+		return refreshDoneMsg{
+			sessions: sessions,
+			note:     combineNotes(fmt.Sprintf("re-scanned · %d sessions", len(sessions)), discoveryNote(discovered.Errors)),
+		}
 	}
 }
 
@@ -986,7 +1013,10 @@ func (m tuiModel) refreshSessions() tea.Cmd {
 	db := m.db
 	filter := m.filter
 	return func() tea.Msg {
-		sessions, _ := db.Query(filter)
+		sessions, err := db.Query(filter)
+		if err != nil {
+			return refreshDoneMsg{err: err}
+		}
 		return refreshDoneMsg{sessions: sessions}
 	}
 }
@@ -999,10 +1029,32 @@ func (m tuiModel) softRefreshCmd() tea.Cmd {
 	db := m.db
 	filter := m.filter
 	return func() tea.Msg {
-		discovered, _ := DiscoverFileBased()
-		_ = db.SyncSessionsScoped(discovered, FileBasedTools)
+		discovered := DiscoverFileBasedDetailed()
+		_ = db.SyncSessionsScoped(discovered.Sessions, discovered.CompleteTools)
 		sessions, _ := db.Query(filter)
 		return softRefreshDoneMsg{sessions: sessions}
+	}
+}
+
+func discoveryNote(errs []error) string {
+	switch len(errs) {
+	case 0:
+		return ""
+	case 1:
+		return "warning: " + errs[0].Error()
+	default:
+		return fmt.Sprintf("%d discovery warnings", len(errs))
+	}
+}
+
+func combineNotes(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + " · " + b
 	}
 }
 
@@ -1072,10 +1124,10 @@ func (m *tuiModel) refilterAndDisplay() tea.Cmd {
 		s := visible[keepIdx]
 		selected = &s
 		// Refresh preview to update transcript-match highlights as the user types.
-		m.preview.SetContent(renderPreview(s, tokens))
+		m.preview.SetContent(renderPreviewCached(s, tokens, m.matchCache))
 	case len(visible) > 0:
 		m.list.Select(0)
-		m.preview.SetContent(renderPreview(visible[0], tokens))
+		m.preview.SetContent(renderPreviewCached(visible[0], tokens, m.matchCache))
 		m.preview.GotoTop()
 		s := visible[0]
 		selected = &s
@@ -1213,8 +1265,11 @@ func highlightTokens(text string, tokens []string) string {
 
 func listTitle(f QueryFilter, n int) string {
 	scope := "all cwds"
-	if f.CWDPrefix != "" {
-		scope = f.CWDPrefix
+	if scopes := f.cwdScopes(); len(scopes) > 0 {
+		scope = scopes[0]
+		if len(scopes) > 1 {
+			scope += fmt.Sprintf(" (+%d)", len(scopes)-1)
+		}
 	}
 	return fmt.Sprintf("Sessions · %d · %s", n, scope)
 }

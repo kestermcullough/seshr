@@ -8,10 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Amp content cache: full thread exports live as JSON files under
-// ~/.local/share/agent-sessions/amp-cache/. We fetch lazily — on the first
+// ~/.local/share/seshr/amp-cache/. We fetch lazily — on the first
 // preview of each thread — and invalidate by comparing the file's mtime to
 // the session's last_active (which comes from the API's `updated` field, so
 // it advances whenever the thread changes server-side).
@@ -29,11 +30,7 @@ func ampCachePath(uuid string) string {
 // or staleness.
 func ampThreadCached(s Session) (*ampThread, bool) {
 	cp := ampCachePath(s.SessionUUID)
-	info, err := os.Stat(cp)
-	if err != nil {
-		return nil, false
-	}
-	if !s.LastActive.IsZero() && info.ModTime().Before(s.LastActive) {
+	if !ampThreadFileFresh(cp, s.LastActive) {
 		return nil, false
 	}
 	data, err := os.ReadFile(cp)
@@ -54,12 +51,16 @@ func ampThreadFetch(s Session) (*ampThread, error) {
 	if bin == "" {
 		return nil, fmt.Errorf("amp binary not on PATH")
 	}
-	out, err := exec.Command(bin, "threads", "export", "T-"+s.SessionUUID).Output()
+	out, err := runCommandOutput(bin, "threads", "export", "T-"+s.SessionUUID)
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			return nil, fmt.Errorf("amp threads export: %s", strings.TrimSpace(string(ee.Stderr)))
 		}
+		return nil, err
+	}
+	var t ampThread
+	if err := json.Unmarshal(out, &t); err != nil {
 		return nil, err
 	}
 	cp := ampCachePath(s.SessionUUID)
@@ -69,9 +70,8 @@ func ampThreadFetch(s Session) (*ampThread, error) {
 	if err := os.WriteFile(cp, out, 0o644); err != nil {
 		return nil, err
 	}
-	var t ampThread
-	if err := json.Unmarshal(out, &t); err != nil {
-		return nil, err
+	if !s.LastActive.IsZero() {
+		_ = os.Chtimes(cp, s.LastActive, s.LastActive)
 	}
 	return &t, nil
 }
@@ -79,9 +79,41 @@ func ampThreadFetch(s Session) (*ampThread, error) {
 // needsAmpFetch reports whether s is a server-backed Amp session without a
 // fresh local cache entry.
 func needsAmpFetch(s Session) bool {
-	if s.Tool != "amp" || s.FilePath != "" {
+	if s.Tool != "amp" {
 		return false
 	}
-	_, ok := ampThreadCached(s)
+	_, ok := ampThreadForPreview(s)
 	return !ok
+}
+
+func ampThreadForPreview(s Session) (*ampThread, bool) {
+	if s.Tool != "amp" {
+		return nil, false
+	}
+	if s.FilePath != "" && ampThreadFileFresh(s.FilePath, s.LastActive) {
+		if t, err := readAmpThreadFile(s.FilePath); err == nil {
+			return t, true
+		}
+	}
+	return ampThreadCached(s)
+}
+
+func ampThreadFileFresh(path string, lastActive time.Time) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return lastActive.IsZero() || !info.ModTime().Before(lastActive)
+}
+
+func readAmpThreadFile(path string) (*ampThread, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var t ampThread
+	if err := json.Unmarshal(data, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
 }

@@ -112,5 +112,8 @@ func parsePiFile(fp string) (Session, error) {
 			}
 		}
 	}
+	if s.SessionUUID == "" {
+		s.SessionUUID = fallbackSessionIDFromPath(fp)
+	}
 	return s, sc.Err()
 }

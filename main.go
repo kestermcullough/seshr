@@ -38,11 +38,11 @@ func main() {
 	}
 
 	if *listOnly {
-		discovered, errs := DiscoverAll()
-		for _, e := range errs {
+		discovered := DiscoverAllDetailed()
+		for _, e := range discovered.Errors {
 			fmt.Fprintln(os.Stderr, "warn:", e)
 		}
-		if err := db.SyncSessions(discovered); err != nil {
+		if err := db.SyncSessionsScoped(discovered.Sessions, discovered.CompleteTools); err != nil {
 			fmt.Fprintln(os.Stderr, "sync:", err)
 			os.Exit(1)
 		}
@@ -86,8 +86,11 @@ func main() {
 
 func printSessions(sessions []Session, f QueryFilter) {
 	scopeNote := "(all cwds)"
-	if f.CWDPrefix != "" {
-		scopeNote = "scope=" + f.CWDPrefix
+	if scopes := f.cwdScopes(); len(scopes) > 0 {
+		scopeNote = "scope=" + scopes[0]
+		if len(scopes) > 1 {
+			scopeNote += fmt.Sprintf(" (+%d)", len(scopes)-1)
+		}
 	}
 	fmt.Printf("Showing %d sessions  %s\n\n", len(sessions), scopeNote)
 
@@ -118,7 +121,8 @@ func printSessions(sessions []Session, f QueryFilter) {
 // sub-sub-command today is `claude-cleanup-days [N]` (omit N to just show).
 func runSettingsCommand(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Session retention by tool:\n")
+		fmt.Println("Session retention by tool:")
+		fmt.Println()
 		for _, s := range SettingsReport() {
 			fmt.Printf("  %-6s %s\n", s.Tool, s.Description)
 			if s.Warning != "" {

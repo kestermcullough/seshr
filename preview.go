@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -16,16 +17,22 @@ import (
 // turn — so the preview shows you *why* this row matched. Falls back to the
 // default behavior when there's no query or no match in the transcript.
 func renderPreview(s Session, tokens []string) string {
+	return renderPreviewCached(s, tokens, nil)
+}
+
+type transcriptMatchCache map[string]transcriptMatch
+
+func renderPreviewCached(s Session, tokens []string, cache transcriptMatchCache) string {
 	header := previewHeader(s)
 
 	if len(tokens) > 0 {
-		if m := findTranscriptMatch(s, tokens); m.found {
+		if m := findTranscriptMatchCached(s, tokens, cache); m.found {
 			return header + renderTranscriptMatch(m, tokens)
 		}
 	}
 
-	if s.Tool == "amp" && s.FilePath == "" {
-		if t, ok := ampThreadCached(s); ok {
+	if s.Tool == "amp" {
+		if t, ok := ampThreadForPreview(s); ok {
 			u, a := extractAmpTurnsFrom(t)
 			return header + renderTurnsBody(u, a, s.FirstMsg)
 		}
@@ -49,6 +56,31 @@ func renderPreview(s Session, tokens []string) string {
 		return header + "(preview error: " + err.Error() + ")\n"
 	}
 	return header + renderTurnsBody(lastUser, lastAssistant, s.FirstMsg)
+}
+
+func findTranscriptMatchCached(s Session, tokens []string, cache transcriptMatchCache) transcriptMatch {
+	if cache == nil {
+		return findTranscriptMatch(s, tokens)
+	}
+	key := transcriptMatchCacheKey(s, tokens)
+	if m, ok := cache[key]; ok {
+		return m
+	}
+	m := findTranscriptMatch(s, tokens)
+	cache[key] = m
+	return m
+}
+
+func transcriptMatchCacheKey(s Session, tokens []string) string {
+	return s.ID() + "\x00" + strconv.FormatInt(s.LastActive.UnixNano(), 10) + "\x00" + strings.Join(tokens, "\x00")
+}
+
+func clearTranscriptMatchCacheForSession(cache transcriptMatchCache, sessionID string) {
+	for key := range cache {
+		if strings.HasPrefix(key, sessionID+"\x00") {
+			delete(cache, key)
+		}
+	}
 }
 
 // transcriptMatch is the result of scanning a session's transcript for the
@@ -184,23 +216,8 @@ func findCodexMatch(s Session, tokens []string) transcriptMatch {
 }
 
 func findAmpMatch(s Session, tokens []string) transcriptMatch {
-	var t *ampThread
-	if s.FilePath != "" {
-		f, err := os.Open(s.FilePath)
-		if err == nil {
-			var tt ampThread
-			if json.NewDecoder(f).Decode(&tt) == nil {
-				t = &tt
-			}
-			f.Close()
-		}
-	}
-	if t == nil {
-		if cached, ok := ampThreadCached(s); ok {
-			t = cached
-		}
-	}
-	if t == nil {
+	t, ok := ampThreadForPreview(s)
+	if !ok {
 		return transcriptMatch{}
 	}
 	var match transcriptMatch

@@ -28,6 +28,15 @@ func (p Project) MatchPath() string {
 	return p.Path
 }
 
+func (p Project) MatchPaths() []string {
+	match := p.MatchPath()
+	paths := []string{match}
+	if p.Path != "" && p.Path != match {
+		paths = append(paths, p.Path)
+	}
+	return paths
+}
+
 // AddProject saves a new project. The user-typed path is stored in `path`;
 // `real_path` is the symlink-resolved version used for matching sessions.
 // If the path already exists the existing row is returned untouched.

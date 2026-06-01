@@ -36,9 +36,14 @@ func ClaudeCleanupPeriodDays() (days int, explicit bool, err error) {
 	if v, ok := raw["cleanupPeriodDays"]; ok {
 		switch n := v.(type) {
 		case float64:
+			if n != float64(int(n)) {
+				return 0, false, fmt.Errorf("cleanupPeriodDays must be an integer")
+			}
 			return int(n), true, nil
 		case int:
 			return n, true, nil
+		default:
+			return 0, false, fmt.Errorf("cleanupPeriodDays must be an integer")
 		}
 	}
 	return claudeDefaultCleanupPeriodDays, false, nil
@@ -64,6 +69,7 @@ func SetClaudeCleanupPeriodDays(days int) error {
 	if err != nil {
 		return err
 	}
+	out = append(out, '\n')
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

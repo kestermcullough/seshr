@@ -3,14 +3,19 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"syscall"
 )
 
 func resumeCommand(s Session) (string, []string, error) {
 	switch s.Tool {
 	case "claude":
-		return "claude", []string{"--resume", s.SessionUUID}, nil
+		args := []string{"--resume", s.SessionUUID}
+		if s.Live {
+			// Claude expects the session id immediately after --resume.
+			// --fork-session must be an additional flag.
+			args = append(args, "--fork-session")
+		}
+		return "claude", args, nil
 	case "codex":
 		return "codex", []string{"resume", s.SessionUUID}, nil
 	case "amp":
@@ -28,16 +33,32 @@ func resumeSession(s Session) error {
 	if err != nil {
 		return err
 	}
-	if s.Live && s.Tool == "claude" {
-		// Claude refuses to --resume a session whose pid sidecar still
-		// references a live process; --fork-session works around that by
-		// creating a new session id while preserving the conversation.
-		args = append([]string{args[0], "--fork-session"}, args[1:]...)
-	}
-	path, err := exec.LookPath(bin)
+	path, err := resolveResumeBinary(bin)
 	if err != nil {
 		return fmt.Errorf("%s not on PATH: %w", bin, err)
 	}
+	if err := enterSessionCWD(s); err != nil {
+		return err
+	}
 	argv := append([]string{path}, args...)
 	return syscall.Exec(path, argv, os.Environ())
+}
+
+func enterSessionCWD(s Session) error {
+	if s.CWD == "" {
+		return nil
+	}
+	if err := changeWorkingDir(s.CWD); err != nil {
+		return fmt.Errorf("change to session cwd %q: %w", s.CWD, err)
+	}
+	return nil
+}
+
+func resolveResumeBinary(bin string) (string, error) {
+	if bin == "amp" {
+		if p := findAmpBinary(); p != "" {
+			return p, nil
+		}
+	}
+	return lookPath(bin)
 }

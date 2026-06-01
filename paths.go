@@ -5,9 +5,22 @@ import (
 	"path/filepath"
 )
 
+var (
+	userHomeDir     = os.UserHomeDir
+	seshrDataDir    string
+	processIDIsLive = pidAlive
+)
+
 func homeDir() string {
-	h, _ := os.UserHomeDir()
+	h, _ := userHomeDir()
 	return h
+}
+
+func dataDir() string {
+	if seshrDataDir != "" {
+		return seshrDataDir
+	}
+	return filepath.Join(homeDir(), ".local", "share", "seshr")
 }
 
 func claudeProjectsDir() string { return filepath.Join(homeDir(), ".claude", "projects") }

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,7 +98,7 @@ func claudeLiveSessions() map[string]bool {
 		if s.PID <= 0 || s.SessionID == "" {
 			continue
 		}
-		if pidAlive(s.PID) {
+		if processIDIsLive(s.PID) {
 			out[s.SessionID] = true
 		}
 	}
@@ -112,7 +113,8 @@ func pidAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return p.Signal(syscall.Signal(0)) == nil
+	err = p.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func parseClaudeFile(fp string) (Session, error) {

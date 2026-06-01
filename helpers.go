@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 )
 
@@ -22,6 +23,14 @@ func cleanInline(s string) string {
 	return strings.TrimSpace(s)
 }
 
+func fallbackSessionIDFromPath(path string) string {
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if i := strings.LastIndex(base, "_"); i >= 0 && i < len(base)-1 {
+		return base[i+1:]
+	}
+	return base
+}
+
 // extractTextFromContent pulls text out of a message-content value that can be
 // either a plain string or an array of content blocks like {"type":"text","text":"..."}.
 // Claude, Pi, and Amp all use the block-array shape; we tolerate strings for safety.
@@ -38,11 +47,13 @@ func extractTextFromContent(raw json.RawMessage) string {
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(raw, &arr); err == nil {
+		var parts []string
 		for _, b := range arr {
 			if b.Type == "text" && b.Text != "" {
-				return b.Text
+				parts = append(parts, b.Text)
 			}
 		}
+		return strings.Join(parts, "\n")
 	}
 	return ""
 }
