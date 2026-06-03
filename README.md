@@ -10,15 +10,33 @@ It walks wherever each agent stores its session files, unifies them, lets you se
 curl -fsSL https://raw.githubusercontent.com/kestermcullough/seshr/main/install.sh | sh
 ```
 
-Requires Go 1.25+ (the script compiles from source via `go install`).
+No Go toolchain is required. The script downloads the latest prebuilt binary from GitHub Releases and installs it into a writable bin directory, usually `~/.local/bin`.
 
-Or, manually:
+Optional overrides:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kestermcullough/seshr/main/install.sh | INSTALL_DIR="$HOME/bin" sh
+curl -fsSL https://raw.githubusercontent.com/kestermcullough/seshr/main/install.sh | VERSION=v0.1.0 sh
+```
+
+Or, build from source:
 
 ```bash
 go install github.com/kestermcullough/seshr@latest
 ```
 
 The binary lands at `$(go env GOPATH)/bin/seshr`. Make sure that's on your PATH.
+
+Prebuilt releases are published for macOS and Linux on `amd64` and `arm64`.
+
+To publish a new release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds the binaries, uploads `seshr_<os>_<arch>.tar.gz` assets, and includes `checksums.txt` for installer verification.
 
 ## Use
 

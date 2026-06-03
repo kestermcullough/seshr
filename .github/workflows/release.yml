@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build release assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          mkdir -p dist
+
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            out_dir="build/${os}_${arch}"
+            mkdir -p "$out_dir"
+
+            GOOS="$os" GOARCH="$arch" go build \
+              -trimpath \
+              -ldflags="-s -w" \
+              -o "$out_dir/seshr" \
+              .
+
+            tar -C "$out_dir" -czf "dist/seshr_${os}_${arch}.tar.gz" seshr
+          done
+
+          (cd dist && sha256sum seshr_*.tar.gz > checksums.txt)
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
